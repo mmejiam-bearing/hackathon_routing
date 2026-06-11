@@ -1,0 +1,150 @@
+<svg viewBox="0 0 780 920" xmlns="http://www.w3.org/2000/svg"
+     font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 2L8 5L2 8" fill="none" stroke="#666" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrb" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 2L8 5L2 8" fill="none" stroke="#3b82f6" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="780" height="920" fill="#f7f8fa"/>
+
+  <!-- title -->
+  <text x="390" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#1a1a2e">Route Query Flow</text>
+  <text x="390" y="54" text-anchor="middle" font-size="11" fill="#666">From FastAPI request through CCH search to validated route result. Hot path: no locks, no allocation, no I/O.</text>
+
+  <!-- layer bands -->
+  <rect x="10"  y="68" width="200" height="756" rx="8" fill="#fefce8" stroke="#fde68a" stroke-width="1"/>
+  <text x="110" y="88" text-anchor="middle" font-size="11" font-weight="700" fill="#92400e">Python layer</text>
+
+  <rect x="222" y="68" width="548" height="756" rx="8" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="496" y="88" text-anchor="middle" font-size="11" font-weight="700" fill="#15803d">C++ routing engine  (shared lib via pybind11)</text>
+
+  <!-- ─── Step 1: FastAPI ─── -->
+  <rect x="22"  y="104" width="176" height="60" rx="7" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="110" y="127" text-anchor="middle" font-size="12" font-weight="700" fill="#374151">FastAPI handler</text>
+  <text x="110" y="143" text-anchor="middle" font-size="10" fill="#555">origin · dest · vessel IMO</text>
+  <text x="110" y="157" text-anchor="middle" font-size="10" fill="#777">auth · validation</text>
+
+  <line x1="198" y1="134" x2="234" y2="134" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 2: Snap to graph node ─── -->
+  <rect x="236" y="104" width="200" height="60" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="336" y="127" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Snap to graph node</text>
+  <text x="336" y="143" text-anchor="middle" font-size="10" fill="#555">WPI port coords → node_id</text>
+  <text x="336" y="157" text-anchor="middle" font-size="10" fill="#777">GeoPositionToNode (RoutingKit)</text>
+
+  <line x1="436" y1="134" x2="474" y2="134" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 3: CCH metric (cached) ─── -->
+  <rect x="476" y="104" width="284" height="60" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="618" y="127" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">CCH metric (cached)</text>
+  <text x="618" y="143" text-anchor="middle" font-size="10" fill="#555">atomic&lt;shared_ptr&lt;Metric&gt;&gt; load</text>
+  <text x="618" y="157" text-anchor="middle" font-size="10" fill="#777">Rebuilt on weather update only · not per query</text>
+
+  <line x1="336" y1="164" x2="336" y2="192" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 4: CCH bidirectional query ─── -->
+  <rect x="236" y="192" width="524" height="60" rx="7" fill="#fff" stroke="#374151" stroke-width="2"/>
+  <text x="498" y="215" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">CCH bidirectional query  (CchQueryState::run)</text>
+  <text x="498" y="231" text-anchor="middle" font-size="10" fill="#555">Upward search from origin + dest · meet in hierarchy · thread_local state reconstructed on gen bump</text>
+  <text x="498" y="245" text-anchor="middle" font-size="10" fill="#888">Typical latency: 10–500 μs</text>
+
+  <line x1="498" y1="252" x2="498" y2="282" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 5: Edge weight HOT PATH ─── -->
+  <rect x="236" y="282" width="524" height="128" rx="7" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+  <text x="498" y="306" text-anchor="middle" font-size="13" font-weight="700" fill="#c2410c">Edge weight  (compute_edge_cost — called millions of times per query)</text>
+  <line x1="250" y1="314" x2="746" y2="314" stroke="#fed7aa" stroke-width="1"/>
+  <text x="498" y="330" text-anchor="middle" font-size="11" fill="#374151">1. snap_table lookup → weather cell idx  (O(1), two array reads, no branch)</text>
+  <text x="498" y="346" text-anchor="middle" font-size="11" fill="#374151">2. float16 → float32 cast  (vcvtph2ps, 1 cycle on AVX)</text>
+  <text x="498" y="362" text-anchor="middle" font-size="11" fill="#374151">3. vessel.foc_model(sigwh, wind_spd, current_component)  →  {speed_kts, foc_per_nm}</text>
+  <text x="498" y="378" text-anchor="middle" font-size="11" fill="#374151">4. ECA flag bitmask → cost multiplier  (branch-free: 1 + 0.15 × bit)</text>
+  <text x="498" y="396" text-anchor="middle" font-size="10" fill="#888" font-style="italic">FLAG_CANAL_TRANSIT: bypass weather lookup entirely, use calm-water FOC model instead</text>
+
+  <!-- canal bypass annotation (left) -->
+  <rect x="22" y="306" width="176" height="60" rx="7" fill="#fff" stroke="#f97316" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="110" y="325" text-anchor="middle" font-size="10" fill="#c2410c">FLAG_CANAL_TRANSIT?</text>
+  <text x="110" y="339" text-anchor="middle" font-size="10" fill="#555">→ calm water FOC</text>
+  <text x="110" y="353" text-anchor="middle" font-size="10" fill="#555">   skip wx lookup</text>
+  <text x="110" y="367" text-anchor="middle" font-size="10" fill="#777">Panama · Suez · Kiel</text>
+  <line x1="198" y1="336" x2="234" y2="336" stroke="#f97316" stroke-width="1" stroke-dasharray="4 3"/>
+
+  <line x1="498" y1="410" x2="498" y2="438" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 6: Candidate route ─── -->
+  <rect x="236" y="438" width="524" height="52" rx="7" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="498" y="460" text-anchor="middle" font-size="12" font-weight="700" fill="#111827">Candidate route  (node_id sequence + cumulative FOC)</text>
+  <text x="498" y="476" text-anchor="middle" font-size="10" fill="#777">Macro-optimal but not yet safety-checked</text>
+
+  <line x1="498" y1="490" x2="498" y2="512" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="250" y1="512" x2="746" y2="512" stroke="#ccc" stroke-width="1"/>
+
+  <!-- ─── Step 7a: S-57 micro-validation ─── -->
+  <rect x="236" y="512" width="250" height="68" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="361" y="534" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">S-57 micro-validation</text>
+  <text x="361" y="550" text-anchor="middle" font-size="10" fill="#555">DEPARE · DEPCNT · WRECKS</text>
+  <text x="361" y="564" text-anchor="middle" font-size="10" fill="#555">RESARE · OBSTRN</text>
+  <text x="361" y="578" text-anchor="middle" font-size="10" fill="#777">US waters (NOAA ENC)</text>
+
+  <!-- ─── Step 7b: OpenSeaMap ─── -->
+  <rect x="510" y="512" width="250" height="68" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="635" y="534" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">OpenSeaMap check</text>
+  <text x="635" y="550" text-anchor="middle" font-size="10" fill="#555">Global hazard buffers</text>
+  <text x="635" y="564" text-anchor="middle" font-size="10" fill="#555">WRECKS · rocks · obstructions</text>
+  <text x="635" y="578" text-anchor="middle" font-size="10" fill="#777">Outside NOAA ENC coverage</text>
+
+  <line x1="361" y1="580" x2="361" y2="606" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="635" y1="580" x2="635" y2="606" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="361" y1="606" x2="669" y2="606" stroke="#666" stroke-width="1.5"/>
+  <line x1="498" y1="606" x2="498" y2="626" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 8: Violation? ─── -->
+  <rect x="236" y="626" width="524" height="52" rx="7" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="498" y="648" text-anchor="middle" font-size="12" font-weight="700" fill="#111827">Violation detected?</text>
+  <text x="498" y="664" text-anchor="middle" font-size="10" fill="#777">DEPARE breach · hazard intersection · RESARE flag · depth below draft + UKC</text>
+
+  <!-- re-route loop (left side) -->
+  <line x1="236" y1="652" x2="110" y2="652" stroke="#3b82f6" stroke-width="1.5"/>
+  <line x1="110" y1="652" x2="110" y2="522" stroke="#3b82f6" stroke-width="1.5"/>
+  <line x1="110" y1="522" x2="236" y2="522" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrb)"/>
+  <text x="66" y="595" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">re-route</text>
+  <text x="66" y="609" text-anchor="middle" font-size="10" fill="#555">penalise</text>
+  <text x="66" y="623" text-anchor="middle" font-size="10" fill="#555">edge · retry</text>
+
+  <!-- no violation branch -->
+  <line x1="498" y1="678" x2="498" y2="700" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="578" y="692" font-size="10" fill="#555">no violation</text>
+
+  <!-- ─── Step 9: Confidence annotation ─── -->
+  <rect x="236" y="700" width="524" height="60" rx="7" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="498" y="722" text-anchor="middle" font-size="12" font-weight="700" fill="#111827">Confidence annotation</text>
+  <text x="498" y="738" text-anchor="middle" font-size="10" fill="#555">snap_dist &gt; 2 cells → FLAG_LOW_CONF_WX on segment</text>
+  <text x="498" y="752" text-anchor="middle" font-size="10" fill="#555">Outside NOAA ENC coverage → warn field in response</text>
+
+  <line x1="498" y1="760" x2="498" y2="782" stroke="#666" stroke-width="1.5"/>
+  <line x1="250" y1="782" x2="498" y2="782" stroke="#666" stroke-width="1.5"/>
+  <line x1="110" y1="782" x2="250" y2="782" stroke="#666" stroke-width="1.5"/>
+  <line x1="110" y1="782" x2="110" y2="800" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Step 10: API response ─── -->
+  <rect x="22" y="800" width="176" height="72" rx="7" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="110" y="822" text-anchor="middle" font-size="12" font-weight="700" fill="#374151">API response</text>
+  <text x="110" y="838" text-anchor="middle" font-size="10" fill="#555">waypoints · total_foc_mt</text>
+  <text x="110" y="852" text-anchor="middle" font-size="10" fill="#555">eta_hours · segment_flags</text>
+  <text x="110" y="866" text-anchor="middle" font-size="10" fill="#777">confidence[ ] per segment</text>
+
+  <!-- weather update note (right) -->
+  <rect x="236" y="800" width="524" height="72" rx="7" fill="#eff6ff" stroke="#93c5fd" stroke-width="1" stroke-dasharray="5 3"/>
+  <text x="498" y="822" text-anchor="middle" font-size="11" font-weight="700" fill="#1d4ed8">Weather update cycle  (every 6 hours, async, off query hot path)</text>
+  <text x="498" y="838" text-anchor="middle" font-size="10" fill="#555">1. ETL writes new weights.bin to S3  ·  2. server polling thread detects new file (mtime)</text>
+  <text x="498" y="852" text-anchor="middle" font-size="10" fill="#555">3. CCH metric customisation (~seconds)  ·  4. atomic&lt;shared_ptr&gt; swap  ·  generation counter bump</text>
+  <text x="498" y="866" text-anchor="middle" font-size="10" fill="#555">5. thread_local CchQueryState reconstructed on next query per thread  ·  in-flight queries finish on old metric</text>
+
+</svg>

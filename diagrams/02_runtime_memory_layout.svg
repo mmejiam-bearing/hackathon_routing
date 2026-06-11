@@ -1,0 +1,171 @@
+<svg viewBox="0 0 780 760" xmlns="http://www.w3.org/2000/svg"
+     font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 2L8 5L2 8" fill="none" stroke="#666" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 2L8 5L2 8" fill="none" stroke="#15803d" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="780" height="760" fill="#f7f8fa"/>
+
+  <!-- title -->
+  <text x="390" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#1a1a2e">Runtime Memory Layout</text>
+  <text x="390" y="54" text-anchor="middle" font-size="11" fill="#666">Three isolated memory regions. No locks between query threads. Weather updates never pause queries.</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- REGION 1: Static mmap -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <rect x="10" y="68" width="760" height="196" rx="10" fill="#f0fdf4" stroke="#16a34a" stroke-width="2" stroke-dasharray="8 4"/>
+  <text x="26" y="90"  font-size="13" font-weight="700" fill="#15803d">Static Region — memory-mapped from S3, read-only</text>
+  <text x="26" y="106" font-size="11" fill="#555">~685 MB total · loaded once at startup via mmap(MAP_SHARED|MAP_POPULATE) · never reloaded · all query threads read without locking</text>
+
+  <!-- graph.bin box -->
+  <rect x="22"  y="118" width="170" height="130" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="107" y="140" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">graph.bin</text>
+  <line x1="36" y1="148" x2="178" y2="148" stroke="#d1fae5" stroke-width="1"/>
+  <text x="107" y="164" text-anchor="middle" font-size="10" fill="#444">float32 lat[ ]</text>
+  <text x="107" y="178" text-anchor="middle" font-size="10" fill="#444">float32 lon[ ]</text>
+  <text x="107" y="192" text-anchor="middle" font-size="10" fill="#444">float16 depth[ ]</text>
+  <text x="107" y="206" text-anchor="middle" font-size="10" fill="#444">uint32  row_ptr[ ]</text>
+  <text x="107" y="220" text-anchor="middle" font-size="10" fill="#444">uint32  col_idx[ ]</text>
+  <text x="107" y="234" text-anchor="middle" font-size="10" fill="#444">float32 base_dist_nm[ ]</text>
+
+  <!-- cch_topo.bin box -->
+  <rect x="204" y="118" width="170" height="130" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="289" y="140" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">cch_topo.bin</text>
+  <line x1="218" y1="148" x2="360" y2="148" stroke="#d1fae5" stroke-width="1"/>
+  <text x="289" y="164" text-anchor="middle" font-size="10" fill="#444">CCH node order</text>
+  <text x="289" y="178" text-anchor="middle" font-size="10" fill="#444">Shortcut edges</text>
+  <text x="289" y="192" text-anchor="middle" font-size="10" fill="#444">Contraction hierarchy</text>
+  <text x="289" y="208" text-anchor="middle" font-size="10" fill="#777">~500 MB</text>
+  <text x="289" y="222" text-anchor="middle" font-size="10" fill="#777">RoutingKit format</text>
+
+  <!-- flags.bin box -->
+  <rect x="386" y="118" width="170" height="130" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="471" y="140" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">flags.bin</text>
+  <line x1="400" y1="148" x2="542" y2="148" stroke="#d1fae5" stroke-width="1"/>
+  <text x="471" y="164" text-anchor="middle" font-size="10" fill="#444">FLAG_ECA          0x01</text>
+  <text x="471" y="178" text-anchor="middle" font-size="10" fill="#444">FLAG_TSS          0x02</text>
+  <text x="471" y="192" text-anchor="middle" font-size="10" fill="#444">FLAG_RESTRICTED   0x04</text>
+  <text x="471" y="206" text-anchor="middle" font-size="10" fill="#444">FLAG_CANAL_TRANSIT 0x08</text>
+  <text x="471" y="220" text-anchor="middle" font-size="10" fill="#444">FLAG_LOW_CONF_WX  0x10</text>
+
+  <!-- snap.bin box -->
+  <rect x="568" y="118" width="196" height="130" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="666" y="140" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">snap.bin</text>
+  <line x1="582" y1="148" x2="750" y2="148" stroke="#d1fae5" stroke-width="1"/>
+  <text x="666" y="164" text-anchor="middle" font-size="10" fill="#444">uint16 snap_lat[1,038,240]</text>
+  <text x="666" y="178" text-anchor="middle" font-size="10" fill="#444">uint16 snap_lon[1,038,240]</text>
+  <text x="666" y="196" text-anchor="middle" font-size="10" fill="#777">4 MB total</text>
+  <text x="666" y="212" text-anchor="middle" font-size="10" fill="#777">O(1) narrow-strait</text>
+  <text x="666" y="226" text-anchor="middle" font-size="10" fill="#777">weather redirect</text>
+
+  <text x="390" y="256" text-anchor="middle" font-size="10" fill="#666" font-style="italic">All four files share one OS page cache — no duplication in RAM. SIGBUS on missing file caught at init, not at query time.</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- REGION 2: Weather tensor -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <rect x="10" y="282" width="760" height="270" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" stroke-dasharray="8 4"/>
+  <text x="26" y="304" font-size="13" font-weight="700" fill="#1d4ed8">Weather Tensor — double-buffered, heap-allocated</text>
+  <text x="26" y="320" font-size="11" fill="#555">~1.52 GB total (2 × 760 MB) · updated every 6 hours · atomic shared_ptr swap · zero-downtime</text>
+
+  <!-- Buffer A (active) -->
+  <rect x="22" y="332" width="350" height="204" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="197" y="354" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">Buffer A  (active ●)</text>
+  <text x="197" y="370" text-anchor="middle" font-size="10" fill="#1e40af">std::shared_ptr held by all query threads</text>
+
+  <!-- wave vars -->
+  <rect x="32"  y="380" width="156" height="72" rx="6" fill="#fff" stroke="#60a5fa" stroke-width="1"/>
+  <text x="110" y="398" text-anchor="middle" font-size="11" font-weight="600" fill="#1d4ed8">Wave variables</text>
+  <text x="110" y="413" text-anchor="middle" font-size="10" fill="#444">sigwh · pwh · pwp · pwd</text>
+  <text x="110" y="427" text-anchor="middle" font-size="10" fill="#444">pswh · pswp · pswd</text>
+  <text x="110" y="441" text-anchor="middle" font-size="10" fill="#777">float16 · ~2 MB each</text>
+
+  <!-- wind/current vars -->
+  <rect x="200" y="380" width="160" height="72" rx="6" fill="#fff" stroke="#60a5fa" stroke-width="1"/>
+  <text x="280" y="398" text-anchor="middle" font-size="11" font-weight="600" fill="#1d4ed8">Wind / Current</text>
+  <text x="280" y="413" text-anchor="middle" font-size="10" fill="#444">was · wad · wsd</text>
+  <text x="280" y="427" text-anchor="middle" font-size="10" fill="#444">ocs_u · ocs_v</text>
+  <text x="280" y="441" text-anchor="middle" font-size="10" fill="#777">float16 · SoA layout</text>
+
+  <text x="197" y="472" text-anchor="middle" font-size="10" fill="#444">shape: (24, 721, 1440) · dtype: float16</text>
+  <text x="197" y="486" text-anchor="middle" font-size="10" fill="#444">lon 0→360 · lat 90N→90S</text>
+  <text x="197" y="500" text-anchor="middle" font-size="10" fill="#777">NaN cells = land → redirect via snap table</text>
+  <text x="197" y="516" text-anchor="middle" font-size="10" fill="#777">SoA: one contiguous vector per variable</text>
+
+  <!-- Buffer B (standby) -->
+  <rect x="404" y="332" width="350" height="204" rx="8" fill="#fff" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="6 3"/>
+  <text x="579" y="354" text-anchor="middle" font-size="12" font-weight="700" fill="#6b7280">Buffer B  (standby ○)</text>
+  <text x="579" y="374" text-anchor="middle" font-size="11" fill="#9ca3af">Idle until next weather update</text>
+  <text x="579" y="396" text-anchor="middle" font-size="11" fill="#9ca3af">ETL thread writes new .npy</text>
+  <text x="579" y="416" text-anchor="middle" font-size="11" fill="#9ca3af">arrays here while A serves</text>
+  <text x="579" y="436" text-anchor="middle" font-size="11" fill="#9ca3af">queries uninterrupted</text>
+  <text x="579" y="468" text-anchor="middle" font-size="11" fill="#6b7280">Then: atomic&lt;shared_ptr&gt; swap</text>
+  <text x="579" y="488" text-anchor="middle" font-size="11" fill="#6b7280">B becomes active, A drains</text>
+  <text x="579" y="508" text-anchor="middle" font-size="11" fill="#6b7280">Old buffer freed when last</text>
+  <text x="579" y="524" text-anchor="middle" font-size="11" fill="#6b7280">shared_ptr releases it</text>
+
+  <!-- swap arrow -->
+  <path d="M 374 430 Q 391 414 408 430" fill="none" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr2)"/>
+  <text x="391" y="410" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">swap</text>
+
+  <!-- 6h cadence label -->
+  <text x="390" y="548" text-anchor="middle" font-size="11" fill="#555" font-style="italic">Update cost: ~5 s to load new .npy files into standby buffer · atomic swap: &lt;1 ms · queries never blocked</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- REGION 3: Per-thread -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <rect x="10" y="570" width="760" height="156" rx="10" fill="#fff7ed" stroke="#f97316" stroke-width="2" stroke-dasharray="8 4"/>
+  <text x="26" y="592" font-size="13" font-weight="700" fill="#c2410c">Per-Query Thread State — stack / thread-local, zero sharing</text>
+  <text x="26" y="608" font-size="11" fill="#555">One instance per concurrent query · created on first use per thread · destroyed on scope exit · no synchronisation needed</text>
+
+  <!-- Priority queue -->
+  <rect x="22"  y="620" width="172" height="92" rx="8" fill="#fff" stroke="#f97316" stroke-width="1.5"/>
+  <text x="108" y="641" text-anchor="middle" font-size="12" font-weight="700" fill="#c2410c">Priority Queue</text>
+  <line x1="36" y1="649" x2="180" y2="649" stroke="#fed7aa" stroke-width="1"/>
+  <text x="108" y="663" text-anchor="middle" font-size="10" fill="#444">min-heap (node, cost, t)</text>
+  <text x="108" y="677" text-anchor="middle" font-size="10" fill="#444">CCH upward search</text>
+  <text x="108" y="691" text-anchor="middle" font-size="10" fill="#777">AStarEntry — trivially</text>
+  <text x="108" y="703" text-anchor="middle" font-size="10" fill="#777">copyable aggregate</text>
+
+  <!-- Distance array -->
+  <rect x="208" y="620" width="172" height="92" rx="8" fill="#fff" stroke="#f97316" stroke-width="1.5"/>
+  <text x="294" y="641" text-anchor="middle" font-size="12" font-weight="700" fill="#c2410c">Distance Array</text>
+  <line x1="222" y1="649" x2="366" y2="649" stroke="#fed7aa" stroke-width="1"/>
+  <text x="294" y="663" text-anchor="middle" font-size="10" fill="#444">float32 dist[n_nodes]</text>
+  <text x="294" y="677" text-anchor="middle" font-size="10" fill="#444">reset between queries</text>
+  <text x="294" y="691" text-anchor="middle" font-size="10" fill="#777">thread_local — rebuilt</text>
+  <text x="294" y="703" text-anchor="middle" font-size="10" fill="#777">on metric gen bump</text>
+
+  <!-- Vessel params -->
+  <rect x="394" y="620" width="172" height="92" rx="8" fill="#fff" stroke="#f97316" stroke-width="1.5"/>
+  <text x="480" y="641" text-anchor="middle" font-size="12" font-weight="700" fill="#c2410c">Vessel Params</text>
+  <line x1="408" y1="649" x2="552" y2="649" stroke="#fed7aa" stroke-width="1"/>
+  <text x="480" y="663" text-anchor="middle" font-size="10" fill="#444">draft · beam · LOA</text>
+  <text x="480" y="677" text-anchor="middle" font-size="10" fill="#444">foc_model callable</text>
+  <text x="480" y="691" text-anchor="middle" font-size="10" fill="#777">injected per query</text>
+  <text x="480" y="703" text-anchor="middle" font-size="10" fill="#777">std::function</text>
+
+  <!-- Path buffer -->
+  <rect x="580" y="620" width="172" height="92" rx="8" fill="#fff" stroke="#f97316" stroke-width="1.5"/>
+  <text x="666" y="641" text-anchor="middle" font-size="12" font-weight="700" fill="#c2410c">Path Buffer</text>
+  <line x1="594" y1="649" x2="738" y2="649" stroke="#fed7aa" stroke-width="1"/>
+  <text x="666" y="663" text-anchor="middle" font-size="10" fill="#444">node_id sequence</text>
+  <text x="666" y="677" text-anchor="middle" font-size="10" fill="#444">waypoint lat/lon</text>
+  <text x="666" y="691" text-anchor="middle" font-size="10" fill="#777">segment_flags[ ]</text>
+  <text x="666" y="703" text-anchor="middle" font-size="10" fill="#777">total_foc_mt</text>
+
+  <!-- memory summary footer -->
+  <rect x="10" y="736" width="760" height="18" rx="4" fill="#f3f4f6"/>
+  <text x="390" y="749" text-anchor="middle" font-size="11" fill="#374151">
+    Memory summary:  static ~685 MB  +  weather ~1.52 GB  +  thread state ~few MB  =  ~2.2 GB total resident  ·  fits r5.large (16 GB)
+  </text>
+
+</svg>

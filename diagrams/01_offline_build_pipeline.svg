@@ -1,0 +1,197 @@
+<svg viewBox="0 0 780 860" xmlns="http://www.w3.org/2000/svg"
+     font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 2L8 5L2 8" fill="none" stroke="#666" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect width="780" height="860" fill="#f7f8fa"/>
+
+  <!-- title -->
+  <text x="390" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#1a1a2e">Offline Build Pipeline</text>
+  <text x="390" y="54" text-anchor="middle" font-size="11" fill="#666">Runs once per data-source update (months between runs). Produces static S3 artifacts.</text>
+
+  <!-- ─── SECTION BAND: data sources ─── -->
+  <rect x="10" y="68" width="760" height="24" rx="5" fill="#dbeafe" stroke="#93c5fd" stroke-width="1"/>
+  <text x="390" y="84" text-anchor="middle" font-size="11" font-weight="600" fill="#1d4ed8">Free Open-Source Data Sources</text>
+
+  <!-- GEBCO -->
+  <rect x="18" y="100" width="130" height="60" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="83" y="120" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">GEBCO 2023</text>
+  <text x="83" y="136" text-anchor="middle" font-size="10" fill="#444">NetCDF bathymetry</text>
+  <text x="83" y="150" text-anchor="middle" font-size="10" fill="#777">7.5 GB · 15 arc-sec</text>
+
+  <!-- GSHHG -->
+  <rect x="160" y="100" width="130" height="60" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="225" y="120" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">GSHHG 2.3.7</text>
+  <text x="225" y="136" text-anchor="middle" font-size="10" fill="#444">Coastline polygons</text>
+  <text x="225" y="150" text-anchor="middle" font-size="10" fill="#777">170 MB · Shapefile</text>
+
+  <!-- OpenSeaMap -->
+  <rect x="302" y="100" width="130" height="60" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="367" y="120" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">OpenSeaMap</text>
+  <text x="367" y="136" text-anchor="middle" font-size="10" fill="#444">Hazard seamarkers</text>
+  <text x="367" y="150" text-anchor="middle" font-size="10" fill="#777">OSM PBF · CC BY-SA</text>
+
+  <!-- NOAA ENC -->
+  <rect x="444" y="100" width="130" height="60" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="509" y="120" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">NOAA ENC</text>
+  <text x="509" y="136" text-anchor="middle" font-size="10" fill="#444">S-57 US charts</text>
+  <text x="509" y="150" text-anchor="middle" font-size="10" fill="#777">4 GB · Public domain</text>
+
+  <!-- Marnet -->
+  <rect x="586" y="100" width="130" height="60" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="651" y="120" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">Marnet</text>
+  <text x="651" y="136" text-anchor="middle" font-size="10" fill="#444">Base topology</text>
+  <text x="651" y="150" text-anchor="middle" font-size="10" fill="#777">Apache 2.0</text>
+
+  <!-- arrows: sources → processing -->
+  <line x1="83"  y1="160" x2="83"  y2="208" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="225" y1="160" x2="225" y2="208" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="367" y1="160" x2="367" y2="208" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="509" y1="160" x2="509" y2="208" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="651" y1="160" x2="651" y2="208" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── SECTION BAND: processing ─── -->
+  <rect x="10" y="192" width="760" height="24" rx="5" fill="#ede9fe" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="390" y="208" text-anchor="middle" font-size="11" font-weight="600" fill="#5b21b6">Processing (Python, graph_builder)</text>
+
+  <!-- Depth filter -->
+  <rect x="18" y="224" width="130" height="56" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="83" y="244" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Depth Filter</text>
+  <text x="83" y="259" text-anchor="middle" font-size="10" fill="#444">Draft threshold</text>
+  <text x="83" y="273" text-anchor="middle" font-size="10" fill="#777">+1.5 m UKC margin</text>
+
+  <!-- Land mask -->
+  <rect x="160" y="224" width="130" height="56" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="225" y="244" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Land Mask</text>
+  <text x="225" y="259" text-anchor="middle" font-size="10" fill="#444">GeoPandas prune</text>
+  <text x="225" y="273" text-anchor="middle" font-size="10" fill="#777">GSHHS_h_L1.shp</text>
+
+  <!-- Hazard buffers -->
+  <rect x="302" y="224" width="130" height="56" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="367" y="244" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Hazard Buffers</text>
+  <text x="367" y="259" text-anchor="middle" font-size="10" fill="#444">VALSOU radius</text>
+  <text x="367" y="273" text-anchor="middle" font-size="10" fill="#777">WRECKS · UWTROC</text>
+
+  <!-- S-57 validator -->
+  <rect x="444" y="224" width="130" height="56" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="509" y="244" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">S-57 Validator</text>
+  <text x="509" y="259" text-anchor="middle" font-size="10" fill="#444">GDAL/OGR parse</text>
+  <text x="509" y="273" text-anchor="middle" font-size="10" fill="#777">DEPARE · DEPCNT</text>
+
+  <!-- Canal WPs -->
+  <rect x="586" y="224" width="130" height="56" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="651" y="244" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Canal Waypoints</text>
+  <text x="651" y="259" text-anchor="middle" font-size="10" fill="#444">OSM + IMO data</text>
+  <text x="651" y="273" text-anchor="middle" font-size="10" fill="#777">FLAG_CANAL_TRANSIT</text>
+
+  <!-- converge arrows to graph construction -->
+  <line x1="83"  y1="280" x2="83"  y2="314" stroke="#666" stroke-width="1.5"/>
+  <line x1="225" y1="280" x2="225" y2="314" stroke="#666" stroke-width="1.5"/>
+  <line x1="367" y1="280" x2="367" y2="314" stroke="#666" stroke-width="1.5"/>
+  <line x1="509" y1="280" x2="509" y2="314" stroke="#666" stroke-width="1.5"/>
+  <line x1="651" y1="280" x2="651" y2="314" stroke="#666" stroke-width="1.5"/>
+  <line x1="83"  y1="314" x2="697" y2="314" stroke="#666" stroke-width="1.5"/>
+  <line x1="390" y1="314" x2="390" y2="334" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Graph Construction ─── -->
+  <rect x="160" y="334" width="460" height="56" rx="7" fill="#fff" stroke="#374151" stroke-width="2"/>
+  <text x="390" y="356" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">Graph Construction (graph_builder.cpp)</text>
+  <text x="390" y="372" text-anchor="middle" font-size="10" fill="#555">CSR node/edge arrays · FLAG bitmasks · 8-connected ocean grid</text>
+  <text x="390" y="385" text-anchor="middle" font-size="10" fill="#888">~2.6M nodes · ~18M edges at 0.25° global resolution</text>
+
+  <!-- sigwh.npy side input -->
+  <rect x="18" y="352" width="130" height="52" rx="7" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="83" y="372" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">sigwh.npy</text>
+  <text x="83" y="387" text-anchor="middle" font-size="10" fill="#444">NaN = land mask</text>
+  <text x="83" y="400" text-anchor="middle" font-size="10" fill="#777">float16 · ~2 MB</text>
+
+  <line x1="148" y1="378" x2="160" y2="378" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- arrow: graph construction → CCH -->
+  <line x1="390" y1="390" x2="390" y2="422" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── Snap Table side branch ─── -->
+  <line x1="83" y1="404" x2="83" y2="442" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="18" y="442" width="130" height="52" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="83" y="462" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Snap Table</text>
+  <text x="83" y="477" text-anchor="middle" font-size="10" fill="#444">BFS nearest-ocean</text>
+  <text x="83" y="491" text-anchor="middle" font-size="10" fill="#777">EDT from NaN mask</text>
+
+  <!-- ─── CCH Preprocessing ─── -->
+  <rect x="160" y="422" width="460" height="56" rx="7" fill="#fff" stroke="#374151" stroke-width="2"/>
+  <text x="390" y="444" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">CCH Preprocessing (RoutingKit, C++)</text>
+  <text x="390" y="460" text-anchor="middle" font-size="10" fill="#555">Node contraction order · shortcut edge insertion</text>
+  <text x="390" y="473" text-anchor="middle" font-size="10" fill="#888">Minutes to hours · result serialised to cch_topo.bin · never rebuilt at server startup</text>
+
+  <line x1="390" y1="478" x2="390" y2="514" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── SECTION BAND: S3 artifacts ─── -->
+  <rect x="10" y="498" width="760" height="24" rx="5" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+  <text x="390" y="514" text-anchor="middle" font-size="11" font-weight="600" fill="#15803d">S3 Artifacts — Memory-mapped read-only at server startup</text>
+
+  <!-- graph.bin -->
+  <rect x="18"  y="530" width="166" height="64" rx="7" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="101" y="551" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">graph.bin</text>
+  <text x="101" y="566" text-anchor="middle" font-size="10" fill="#444">CSR lat/lon/depth</text>
+  <text x="101" y="580" text-anchor="middle" font-size="10" fill="#444">row_ptr · col_idx</text>
+  <text x="101" y="594" text-anchor="middle" font-size="10" fill="#777">magic 0x4752414D</text>
+
+  <!-- flags.bin -->
+  <rect x="196" y="530" width="166" height="64" rx="7" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="279" y="551" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">flags.bin</text>
+  <text x="279" y="566" text-anchor="middle" font-size="10" fill="#444">uint8 per node</text>
+  <text x="279" y="580" text-anchor="middle" font-size="10" fill="#444">ECA · TSS · CANAL</text>
+  <text x="279" y="594" text-anchor="middle" font-size="10" fill="#777">no header</text>
+
+  <!-- cch_topo.bin -->
+  <rect x="374" y="530" width="166" height="64" rx="7" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="457" y="551" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">cch_topo.bin</text>
+  <text x="457" y="566" text-anchor="middle" font-size="10" fill="#444">RoutingKit topology</text>
+  <text x="457" y="580" text-anchor="middle" font-size="10" fill="#444">~500 MB · fast load</text>
+  <text x="457" y="594" text-anchor="middle" font-size="10" fill="#777">RoutingKit format</text>
+
+  <!-- snap.bin -->
+  <rect x="552" y="530" width="168" height="64" rx="7" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="636" y="551" text-anchor="middle" font-size="12" font-weight="700" fill="#15803d">snap.bin</text>
+  <text x="636" y="566" text-anchor="middle" font-size="10" fill="#444">snap_lat / snap_lon</text>
+  <text x="636" y="580" text-anchor="middle" font-size="10" fill="#444">4 MB · uint16×2</text>
+  <text x="636" y="594" text-anchor="middle" font-size="10" fill="#777">magic 0x50414E53</text>
+
+  <!-- arrows into artifacts -->
+  <line x1="250" y1="514" x2="101" y2="530" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="330" y1="514" x2="279" y2="530" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="390" y1="514" x2="457" y2="530" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- snap.bin arrow from snap table -->
+  <line x1="83" y1="494" x2="83" y2="508" stroke="#666" stroke-width="1.5"/>
+  <line x1="83" y1="508" x2="636" y2="508" stroke="#666" stroke-width="1.5"/>
+  <line x1="636" y1="508" x2="636" y2="530" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ─── rebuild cadence note ─── -->
+  <rect x="10" y="612" width="760" height="52" rx="7" fill="none" stroke="#ccc" stroke-width="1" stroke-dasharray="5 3"/>
+  <text x="390" y="632" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">Rebuild cadence</text>
+  <text x="390" y="648" text-anchor="middle" font-size="11" fill="#555">Graph structure changes (new bathymetry, new hazard data, ECA boundary change) → rebuild graph.bin · flags.bin · snap.bin</text>
+  <text x="390" y="663" text-anchor="middle" font-size="11" fill="#555">Graph structure change → also rebuild cch_topo.bin (slow). Server restart loads the new topology in milliseconds.</text>
+
+  <!-- ─── legend ─── -->
+  <rect x="10" y="678" width="760" height="56" rx="7" fill="#f3f4f6" stroke="#d1d5db" stroke-width="1"/>
+  <text x="22" y="697" font-size="11" font-weight="700" fill="#374151">Legend</text>
+  <rect x="22"  y="706" width="13" height="13" rx="3" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="42"  y="718" font-size="11" fill="#374151">Open-source data source</text>
+  <rect x="220" y="706" width="13" height="13" rx="3" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="240" y="718" font-size="11" fill="#374151">Processing / transformation</text>
+  <rect x="460" y="706" width="13" height="13" rx="3" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="480" y="718" font-size="11" fill="#374151">S3 binary artifact</text>
+  <rect x="22"  y="724" width="13" height="13" rx="3" fill="#fff" stroke="#374151" stroke-width="2"/>
+  <text x="42"  y="736" font-size="11" fill="#374151">Orchestration step (graph construction / CCH)</text>
+  <line x1="440" y1="731" x2="464" y2="731" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="472" y="736" font-size="11" fill="#374151">Data flow</text>
+
+</svg>
