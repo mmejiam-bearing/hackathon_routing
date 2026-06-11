@@ -34,6 +34,8 @@ The system is split into three separate executables with distinct cadences and r
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+![Offline Build Pipeline](diagrams/01_offline_build_pipeline.svg)
+
 ### Why three programs
 
 The three programs have incompatible runtime characteristics:
@@ -45,6 +47,8 @@ The three programs have incompatible runtime characteristics:
 | `router_server` | Always running | Low CPU, high concurrency | ~2.2 GB resident |
 
 The graph builder has no business being in the query server's process. The weather ETL has no business reading `.npy` files inside the query server. Each program does exactly one job.
+
+![Runtime Memory Layout](diagrams/02_runtime_memory_layout.svg)
 
 ---
 
@@ -236,6 +240,8 @@ until the destination is reached (see [Rolling-horizon weather routing](#rolling
   --speed    12.0                          \
   --out      voyage_rolling.geojson
 ```
+
+![Route Query Flow](diagrams/03_query_flow.svg)
 
 ---
 
