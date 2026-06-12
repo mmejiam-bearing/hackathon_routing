@@ -80,39 +80,74 @@ def load_graph_csr(graph_bin_path: str) -> dict:
     return result
 
 
-def compute_weights(graph: dict, sigwh: np.ndarray) -> np.ndarray:
+def compute_weights(
+    graph: dict,
+    sigwh: np.ndarray,
+    was: np.ndarray,
+    wad: np.ndarray,
+) -> np.ndarray:
     """
-    Proxy FOC cost: distance × (1 + wave_height / 6), scaled to uint32.
+    Proxy FOC cost: distance × (1 + sigwh/3 + headwind_factor), scaled to uint32.
     Matches WeightsWriter::compute() in weather_etl/src/weights_writer.cpp.
+
+    headwind_factor = max(0, -was · cos(hdg - wad_rad)) / WIND_REF_SPEED
+    where hdg is the great-circle bearing from source to dest node and
+    wad uses the "going-to" convention (0° = North, 90° = East).
 
     NOTE: this is O(n_edges) in pure Python — ~18M iterations for a global
     0.25° graph. Replace with pybind11 call to C++ when bindings exist.
     """
+    import math
+
     n_edges = graph["n_edges"]
     weights = np.empty(n_edges, dtype=np.uint32)
 
     row_ptr      = graph["row_ptr"]
+    col_idx      = graph["col_idx"]
     base_dist_nm = graph["base_dist_nm"]
     lat_arr      = graph["lat"]
     lon_arr      = graph["lon"]
 
-    SCALE    = 1000.0
-    MAX_W    = 0xFFFFFFFE
+    SCALE          = 1000.0
+    MAX_W          = 0xFFFFFFFE
+    WIND_REF_SPEED = 20.0
 
     for u in range(graph["n_nodes"]):
-        lat = float(lat_arr[u])
-        lon = float(lon_arr[u])
-        if lon < 0.0:
-            lon += 360.0
+        lat_u = float(lat_arr[u])
+        lon_u = float(lon_arr[u])
+        wx_lon_u = lon_u if lon_u >= 0.0 else lon_u + 360.0
 
-        lat_i = max(0, min(int((90.0 - lat) / 0.25), 720))
-        lon_i = int(lon / 0.25) % 1440
+        lat_i = max(0, min(int((90.0 - lat_u) / 0.25), 720))
+        lon_i = int(wx_lon_u / 0.25) % 1440
 
-        val = sigwh[lat_i, lon_i]
-        sig_wh = 0.0 if np.isnan(val) else float(val)
+        sig_wh_val = sigwh[lat_i, lon_i]
+        sig_wh = 0.0 if np.isnan(sig_wh_val) else float(sig_wh_val)
+
+        was_val_raw = was[lat_i, lon_i]
+        was_val = 0.0 if np.isnan(was_val_raw) else float(was_val_raw)
+
+        wad_val_raw = wad[lat_i, lon_i]
+        wad_rad = 0.0 if np.isnan(wad_val_raw) else math.radians(float(wad_val_raw))
 
         for e in range(row_ptr[u], row_ptr[u + 1]):
-            proxy = float(base_dist_nm[e]) * (1.0 + sig_wh / 6.0)
+            v = int(col_idx[e])
+            lat_v = float(lat_arr[v])
+            lon_v = float(lon_arr[v])
+
+            # Great-circle bearing from u to v (radians, clockwise from North)
+            dlon = math.radians(lon_v - lon_u)
+            rlat_u = math.radians(lat_u)
+            rlat_v = math.radians(lat_v)
+            hdg = math.atan2(
+                math.sin(dlon) * math.cos(rlat_v),
+                math.cos(rlat_u) * math.sin(rlat_v)
+                - math.sin(rlat_u) * math.cos(rlat_v) * math.cos(dlon),
+            )
+
+            # Headwind penalty: positive when vessel heads into the wind
+            headwind_f = max(0.0, -was_val * math.cos(hdg - wad_rad)) / WIND_REF_SPEED
+
+            proxy = float(base_dist_nm[e]) * (1.0 + sig_wh / 3.0 + headwind_f)
             w = max(1, min(int(proxy * SCALE), MAX_W))
             weights[e] = w
 
@@ -141,11 +176,13 @@ def run(args):
         log.info("Fetching .npy files from s3://%s/%s", args.npy_bucket, args.npy_prefix)
         fetch_npy_files(s3, args.npy_bucket, args.npy_prefix, tmp)
 
-        # 2. Load sigwh for weight computation (other variables for future FOC model)
-        sigwh_path = tmp / "sigwh.npy"
-        if not sigwh_path.exists():
-            raise FileNotFoundError("sigwh.npy not found — required for weight computation")
-        sigwh = np.load(str(sigwh_path))   # float16 (721, 1440); np.load returns first copy only
+        # 2. Load weather variables needed for weight computation
+        for required in ("sigwh.npy", "was.npy", "wad.npy"):
+            if not (tmp / required).exists():
+                raise FileNotFoundError(f"{required} not found — required for weight computation")
+        sigwh = np.load(str(tmp / "sigwh.npy"))
+        was   = np.load(str(tmp / "was.npy"))
+        wad   = np.load(str(tmp / "wad.npy"))
         log.info("sigwh shape: %s  dtype: %s", sigwh.shape, sigwh.dtype)
 
         # 3. Download graph.bin for CSR structure
@@ -157,7 +194,7 @@ def run(args):
         # 4. Compute weights
         log.info("Computing edge weights...")
         t0 = time.perf_counter()
-        weights = compute_weights(graph, sigwh)
+        weights = compute_weights(graph, sigwh, was, wad)
         log.info("Weights computed in %.1f s", time.perf_counter() - t0)
 
         # 5. Write weights.bin

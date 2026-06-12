@@ -117,12 +117,13 @@ struct CchRouteRequest {
 struct CchRouteResult {
     enum class Status { Ok, NoRoute, WeatherUnavailable };
 
-    Status                status       = Status::Ok;
+    Status                status        = Status::Ok;
     std::vector<uint32_t> node_path;
     std::vector<float>    waypoint_lat;
     std::vector<float>    waypoint_lon;
     float                 total_foc_mt  = 0.f;
     float                 total_dist_nm = 0.f;
+    float                 total_time_h  = 0.f;
     std::vector<uint8_t>  segment_flags;
 };
 
@@ -231,8 +232,10 @@ public:
                 const int ts = std::clamp(
                     req.base_time_step + static_cast<int>(i),
                     0, WX_N_TIMESTEPS - 1);
-                result.total_foc_mt  +=
+                const EdgeCost ec =
                     compute_edge_cost(from, to, ts, graph_, *wx, req.vessel);
+                result.total_foc_mt  += ec.foc_mt;
+                result.total_time_h  += ec.time_h;
                 result.total_dist_nm +=
                     haversine_nm(graph_.lat()[from], graph_.lon()[from],
                                  graph_.lat()[to],   graph_.lon()[to]);

@@ -24,6 +24,7 @@
 #include "maritime/routing_engine.hpp"
 #include "maritime/static_graph.hpp"
 #include "maritime/edge_weight.hpp"
+#include "maritime/foc_model.hpp"
 #include "maritime/weather_manager.hpp"
 
 #include "npy_loader.hpp"
@@ -97,6 +98,7 @@ struct DaySegment {
     int                day     = 0;
     float              dist_nm = 0.f;
     float              foc_mt  = 0.f;
+    float              time_h  = 0.f;
     std::vector<float> lat;
     std::vector<float> lon;
 };
@@ -115,7 +117,8 @@ void write_geojson(const std::vector<DaySegment>& segs, const std::string& path)
           << "      \"properties\": {"
           << " \"day\": "     << s.day      << ","
           << " \"dist_nm\": " << s.dist_nm  << ","
-          << " \"foc_mt\": "  << s.foc_mt
+          << " \"foc_mt\": "  << s.foc_mt   << ","
+          << " \"time_h\": "  << s.time_h
           << " },\n"
           << "      \"geometry\": {\n"
           << "        \"type\": \"LineString\",\n"
@@ -144,7 +147,7 @@ int main(int argc, char** argv)
     std::vector<std::string> npy_dirs;
     float from_lat  = 51.9f, from_lon = 4.5f;
     float to_lat    =  1.3f, to_lon   = 103.8f;
-    float speed_kts = 12.f;
+    float speed_kts = 14.f;   // sets vessel.service_speed_kts; actual per-edge speed derived from physics
     std::string out_path = "voyage_rolling.geojson";
 
     for (int i = 1; i < argc; ++i) {
@@ -194,11 +197,17 @@ int main(int argc, char** argv)
                   << " forecast period(s) available\n\n";
 
         maritime::VesselParams vessel;
-        vessel.draft_m   = 10.f;
-        vessel.beam_m    = 32.f;
-        vessel.loa_m     = 200.f;
-        vessel.foc_model = [](float, float, float) -> std::pair<float, float> {
-            return {12.f, 20.f / 24.f / 12.f};   // 20 MT/day at 12 kts → MT/nm
+        vessel.draft_m            = 10.f;
+        vessel.beam_m             = 32.f;
+        vessel.loa_m              = 200.f;
+        vessel.service_speed_kts  = speed_kts;
+        vessel.block_coeff        = 0.80f;
+        vessel.displacement_t     = 50000.f;
+        vessel.transverse_area_m2 = 600.f;
+        vessel.foc_model = [spd = vessel.service_speed_kts]
+            (float /*sig_wh*/, float wind_spd, float /*curr*/)
+            -> std::pair<float, float> {
+            return maritime::universal_foc_model(wind_spd, spd);
         };
 
         uint32_t current_node = src;
@@ -225,7 +234,7 @@ int main(int argc, char** argv)
                           << " for day " << period_idx << " ...\n";
                 current_wx = load_npy_dir(npy_dirs[effective]);
                 auto weights = maritime::weather_etl::WeightsWriter::compute(
-                    graph, *current_wx, 0);
+                    graph, *current_wx, 0, &vessel);
                 engine.update_weights(std::move(weights));
                 engine.update_weather(current_wx);
                 last_loaded = effective;
@@ -262,14 +271,17 @@ int main(int argc, char** argv)
                 seg.lat.push_back(graph.lat()[from]);
                 seg.lon.push_back(graph.lon()[from]);
 
+                maritime::EdgeCost ec{0.f, d_nm / vessel.service_speed_kts};
                 if (current_wx) {
                     const int ts = std::clamp(static_cast<int>(i),
                                               0, maritime::WX_N_TIMESTEPS - 1);
-                    seg.foc_mt += maritime::compute_edge_cost(
+                    ec = maritime::compute_edge_cost(
                         from, to, ts, graph, *current_wx, vessel);
                 }
+                seg.foc_mt  += ec.foc_mt;
+                seg.time_h  += ec.time_h;
                 seg.dist_nm += d_nm;
-                elapsed_h   += d_nm / speed_kts;
+                elapsed_h   += ec.time_h;
                 current_node = to;
 
                 if (to == dst) {
@@ -299,9 +311,12 @@ int main(int argc, char** argv)
             std::cerr << "[voyage] Warning: destination not reached after "
                       << period_idx << " periods.\n";
 
+        float total_time = 0.f;
+        for (const auto& s : segments) total_time += s.time_h;
         std::cout << "\n[voyage] Complete: " << segments.size() << " day(s)"
                   << "  total_dist=" << total_dist << " nm"
-                  << "  total_foc="  << total_foc  << " mt\n";
+                  << "  total_foc="  << total_foc  << " mt"
+                  << "  total_time=" << total_time  << " h\n";
 
         write_geojson(segments, out_path);
         std::cout << "[voyage] Written: " << out_path << "\n";

@@ -11,6 +11,7 @@
 
 #include "maritime/static_graph.hpp"
 #include "maritime/edge_weight.hpp"
+#include "maritime/foc_model.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -77,14 +78,18 @@ int main(int argc, char** argv)
         std::cout << "Dest   node " << dst << " at ("
                   << g.lat()[dst] << ", " << g.lon()[dst] << ")\n";
 
-        // Minimal FOC model: flat speed 12 kts, 20 MT/day base consumption
         maritime::VesselParams vessel;
-        vessel.draft_m = 10.f;
-        vessel.beam_m  = 32.f;
-        vessel.loa_m   = 200.f;
-        vessel.foc_model = [](float /*sig_wh*/, float /*wind_spd*/, float /*curr*/)
+        vessel.draft_m            = 10.f;
+        vessel.beam_m             = 32.f;
+        vessel.loa_m              = 200.f;
+        vessel.service_speed_kts  = 14.f;
+        vessel.block_coeff        = 0.80f;
+        vessel.displacement_t     = 50000.f;
+        vessel.transverse_area_m2 = 600.f;
+        vessel.foc_model = [spd = vessel.service_speed_kts]
+            (float /*sig_wh*/, float wind_spd, float /*curr*/)
             -> std::pair<float,float> {
-            return {12.f, 20.f / 24.f / 12.f};  // 20 MT/day at 12 kts → MT/nm
+            return maritime::universal_foc_model(wind_spd, spd);
         };
 
         maritime::CchRouteRequest req{
