@@ -22,6 +22,27 @@ public:
         int                           ref_time_step,
         const maritime::VesselParams* vessel = nullptr);
 
+    // Temporal Gaussian blending: integrates cost over all 24 forecast
+    // timesteps, weighting each by the probability the vessel is at node u
+    // at that time (anisotropic Gaussian in along-track / cross-track frame).
+    //
+    //   w(u,v) = Σ_ts  g(u,ts) × cost(u,v,ts)  /  Σ_ts g(u,ts)
+    //
+    //   g(u,ts) = exp(-½ [(d_along/σ_along)² + (d_perp/σ_perp)²])
+    //   d_along = haversine(origin, u) − ts × service_speed_kts   [nm]
+    //   d_perp  = |cross_track_nm(origin→dest great circle, u)|   [nm]
+    //
+    // sigma_along: timing spread (default 100 nm ≈ 7 h at 14 kts)
+    // sigma_perp:  path-choice spread (default 300 nm ≈ ±5° latitude)
+    [[nodiscard]] static std::vector<uint32_t> compute_blended(
+        const maritime::StaticGraph&   graph,
+        const maritime::WeatherBuffer& wx,
+        const maritime::VesselParams&  vessel,
+        float origin_lat,  float origin_lon,
+        float dest_lat,    float dest_lon,
+        float sigma_along_nm = 100.f,
+        float sigma_perp_nm  = 300.f);
+
     static void write(
         const std::vector<uint32_t>& weights,
         int64_t base_epoch,

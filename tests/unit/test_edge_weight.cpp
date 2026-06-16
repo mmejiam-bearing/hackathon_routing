@@ -344,4 +344,76 @@ TEST(NodeFlags, NoBitOverlap)
     EXPECT_EQ(all, sum);
 }
 
+// ---------------------------------------------------------------------------
+// CrossTrackGeometry — validate cross_track_nm() and along_track_nm().
+// These helpers drive the anisotropic Gaussian in compute_blended(); a silent
+// offset or wrong sign would corrupt every blended weight.
+// ---------------------------------------------------------------------------
+
+// A point on the great circle from O=(0,0) to D=(0,10) should have zero
+// signed perpendicular distance. Validates no constant offset in the formula.
+TEST(CrossTrackGeometry, OnRouteZeroCrossTrack)
+{
+    const float d = cross_track_nm(0.f, 0.f,   // A = origin
+                                   0.f, 10.f,  // B = dest
+                                   0.f, 5.f);  // P = midpoint on great circle
+    EXPECT_NEAR(std::abs(d), 0.f, 0.1f);
+}
+
+// A point displaced 5° of latitude off an equatorial route should produce a
+// substantial cross-track distance (≥200 nm). Confirms sensitivity to lateral
+// displacement, which is what makes σ_perp suppress off-corridor nodes.
+TEST(CrossTrackGeometry, OffRoutePositiveCrossTrack)
+{
+    const float d = cross_track_nm(0.f, 0.f,   // equatorial route
+                                   0.f, 10.f,
+                                   5.f, 5.f);  // 5° north of route
+    EXPECT_GT(std::abs(d), 200.f);
+}
+
+// Three collinear points A, M, B on the same great circle must produce
+// strictly increasing along-track distances from A. The acos(cos/cos) term
+// can fold back to zero near-antipodal or produce NaN — this catches both.
+TEST(CrossTrackGeometry, AlongTrackMonotonic)
+{
+    const float at_a = along_track_nm(51.5f, 0.f, 51.5f, 9.f, 51.5f, 0.f);
+    const float at_m = along_track_nm(51.5f, 0.f, 51.5f, 9.f, 51.5f, 4.5f);
+    const float at_b = along_track_nm(51.5f, 0.f, 51.5f, 9.f, 51.5f, 9.f);
+
+    EXPECT_LT(at_a, at_m);
+    EXPECT_LT(at_m, at_b);
+    EXPECT_FALSE(std::isnan(at_a));
+    EXPECT_FALSE(std::isnan(at_m));
+    EXPECT_FALSE(std::isnan(at_b));
+}
+
+// ---------------------------------------------------------------------------
+// WeatherPenaltyMultiplier
+// ---------------------------------------------------------------------------
+
+// Below 4m: multiplier must be exactly 1 — no penalty for normal ops.
+TEST(WeatherPenaltyMultiplier, BelowThresholdIsUnity)
+{
+    EXPECT_FLOAT_EQ(weather_penalty_multiplier(0.f),  1.f);
+    EXPECT_FLOAT_EQ(weather_penalty_multiplier(2.f),  1.f);
+    EXPECT_FLOAT_EQ(weather_penalty_multiplier(4.f),  1.f);
+}
+
+// At 8m and 12m the multiplier should match exp(0.6*(sig_wh-4)) within 0.5%.
+TEST(WeatherPenaltyMultiplier, AboveThresholdGrowsExponentially)
+{
+    const float m8  = weather_penalty_multiplier(8.f);
+    const float m12 = weather_penalty_multiplier(12.f);
+    EXPECT_NEAR(m8,  std::exp(0.6f * 4.f),  m8  * 0.005f);  // ~11×
+    EXPECT_NEAR(m12, std::exp(0.6f * 8.f),  m12 * 0.005f);  // ~121×
+    EXPECT_GT(m12, m8);   // strictly increasing
+}
+
+// Multiplier must always be strictly positive for any non-negative sig_wh.
+TEST(WeatherPenaltyMultiplier, NeverNegativeOrZero)
+{
+    for (float wh = 0.f; wh <= 20.f; wh += 0.5f)
+        EXPECT_GT(weather_penalty_multiplier(wh), 0.f) << "at sig_wh=" << wh;
+}
+
 } // namespace

@@ -89,6 +89,43 @@ struct EdgeCost {
 }
 
 // ---------------------------------------------------------------------------
+// cross_track_nm
+//
+// Signed perpendicular distance [nm] from point P to the great circle A→B.
+// Positive = P is to the left of the A→B bearing; negative = right.
+// Returns 0 when A == B (degenerate route).
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline float cross_track_nm(
+    float lat_a, float lon_a,
+    float lat_b, float lon_b,
+    float lat_p, float lon_p) noexcept
+{
+    constexpr float R_NM  = 3440.065f;
+    const float d13   = haversine_nm(lat_a, lon_a, lat_p, lon_p) / R_NM;  // central angle A→P
+    const float th13  = bearing_rad(lat_a, lon_a, lat_p, lon_p);          // bearing A→P
+    const float th12  = bearing_rad(lat_a, lon_a, lat_b, lon_b);          // bearing A→B
+    return std::asin(std::sin(d13) * std::sin(th13 - th12)) * R_NM;
+}
+
+// ---------------------------------------------------------------------------
+// along_track_nm
+//
+// Along-track distance [nm] of the projection of point P onto the great
+// circle A→B, measured from A.  Always non-negative; does not detect
+// whether the projection lies between A and B.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline float along_track_nm(
+    float lat_a, float lon_a,
+    float lat_b, float lon_b,
+    float lat_p, float lon_p) noexcept
+{
+    constexpr float R_NM = 3440.065f;
+    const float d13  = haversine_nm(lat_a, lon_a, lat_p, lon_p) / R_NM;
+    const float d_xt = cross_track_nm(lat_a, lon_a, lat_b, lon_b, lat_p, lon_p) / R_NM;
+    return std::acos(std::clamp(std::cos(d13) / std::cos(d_xt), -1.f, 1.f)) * R_NM;
+}
+
+// ---------------------------------------------------------------------------
 // calm_water_resistance_kn
 //
 // ITTC 1957 friction line + simplified Hollenbach residual + C_a correction.
@@ -225,6 +262,30 @@ struct EdgeCost {
 {
     if (R_cw < 1e-6f || delta_R <= 0.f) return 0.f;
     return std::min(100.f, 100.f * (std::sqrt(1.f + delta_R / R_cw) - 1.f));
+}
+
+// ---------------------------------------------------------------------------
+// weather_penalty_multiplier
+//
+// Exponential routing-cost amplifier for heavy weather conditions.
+// Below 4 m sig. wave height the multiplier is 1 (normal ops).
+// Above that it grows as exp(0.6 × (sig_wh − 4)):
+//   4 m →   1×   (Beaufort 5, normal operations)
+//   8 m →  11×   (Beaufort 8, strong gale)
+//  12 m → 121×   (Beaufort 11, violent storm)
+//  15 m → 735×   (Beaufort 12+, hurricane-force)
+//
+// This is a routing penalty, not a physics parameter: the vessel speed-loss
+// model (Kwon) is applied separately. The multiplier prevents edge weights
+// from being passable at the 1 kt minimum speed floor when the conditions are
+// severe enough that any sensible bypass is always preferable.
+// ---------------------------------------------------------------------------
+[[nodiscard]] inline float weather_penalty_multiplier(float sig_wh) noexcept
+{
+    constexpr float THRESHOLD_M = 4.f;
+    constexpr float RATE        = 0.6f;
+    if (sig_wh <= THRESHOLD_M) return 1.f;
+    return std::exp(RATE * (sig_wh - THRESHOLD_M));
 }
 
 // ---------------------------------------------------------------------------

@@ -233,8 +233,12 @@ int main(int argc, char** argv)
                 std::cout << "[voyage] Loading forecast " << npy_dirs[effective]
                           << " for day " << period_idx << " ...\n";
                 current_wx = load_npy_dir(npy_dirs[effective]);
-                auto weights = maritime::weather_etl::WeightsWriter::compute(
-                    graph, *current_wx, 0, &vessel);
+                auto weights = maritime::weather_etl::WeightsWriter::compute_blended(
+                    graph, *current_wx, vessel,
+                    graph.lat()[current_node], graph.lon()[current_node],
+                    graph.lat()[dst],          graph.lon()[dst],
+                    /*sigma_along_nm=*/ 200.f,
+                    /*sigma_perp_nm=*/  400.f);
                 engine.update_weights(std::move(weights));
                 engine.update_weather(current_wx);
                 last_loaded = effective;

@@ -14,6 +14,29 @@
 
 namespace maritime::weather_etl {
 
+// ---------------------------------------------------------------------------
+// Private helper: speed-loss physics shared by compute() and compute_blended().
+// ---------------------------------------------------------------------------
+static float actual_speed_kts(
+    float sig_wh, float was_val, float wad_deg, float pwd_deg,
+    float hdg, const maritime::VesselParams& vessel) noexcept
+{
+    constexpr float DEG2R = std::numbers::pi_v<float> / 180.f;
+    constexpr float R2DEG = 180.f / std::numbers::pi_v<float>;
+
+    const float wind_from    = (wad_deg + 180.f) * DEG2R;
+    const float wave_from    = (pwd_deg + 180.f) * DEG2R;
+    const float wind_rel_deg = std::acos(std::cos(hdg - wind_from)) * R2DEG;
+    const float wave_rel_deg = std::acos(std::cos(hdg - wave_from)) * R2DEG;
+
+    const float R_cw   = maritime::calm_water_resistance_kn(vessel.service_speed_kts, vessel);
+    const float R_wave = maritime::wave_resistance_kn(sig_wh, wave_rel_deg, vessel);
+    const float R_wind = maritime::wind_resistance_kn(was_val, wind_rel_deg,
+                                                      vessel.service_speed_kts, vessel);
+    const float sl = maritime::speed_loss_pct(R_cw, R_wave + R_wind);
+    return std::max(1.f, vessel.service_speed_kts * (1.f - sl / 100.f));
+}
+
 std::vector<uint32_t> WeightsWriter::compute(
     const maritime::StaticGraph&   graph,
     const maritime::WeatherBuffer& wx,
@@ -74,7 +97,8 @@ std::vector<uint32_t> WeightsWriter::compute(
                     vessel->service_speed_kts * (1.f - sl / 100.f));
 
                 constexpr float SCALE = 1e6f;
-                const float cost = base_nm / actual_spd;   // hours
+                const float cost = (base_nm / actual_spd)
+                    * maritime::weather_penalty_multiplier(sig_wh);
                 const uint32_t w = static_cast<uint32_t>(
                     std::min(cost * SCALE, static_cast<float>(MAX_W)));
                 weights[e] = (w == 0u) ? 1u : w;
@@ -95,6 +119,95 @@ std::vector<uint32_t> WeightsWriter::compute(
                 std::min(proxy * SCALE, static_cast<float>(MAX_W)));
 
             weights[e] = (w == 0u) ? 1u : w;  // RoutingKit disallows zero weights
+        }
+    }
+
+    return weights;
+}
+
+std::vector<uint32_t> WeightsWriter::compute_blended(
+    const maritime::StaticGraph&   graph,
+    const maritime::WeatherBuffer& wx,
+    const maritime::VesselParams&  vessel,
+    float origin_lat, float origin_lon,
+    float dest_lat,   float dest_lon,
+    float sigma_along_nm,
+    float sigma_perp_nm)
+{
+    const uint32_t n_edges = graph.n_edges();
+    std::vector<uint32_t> weights(n_edges, 1u);
+
+    const float sa2_inv = 1.f / (sigma_along_nm * sigma_along_nm);
+    const float sp2_inv = 1.f / (sigma_perp_nm  * sigma_perp_nm);
+
+    constexpr float    SCALE = 1e6f;
+    constexpr uint32_t MAX_W = RoutingKit::inf_weight - 1u;
+
+    for (uint32_t u = 0; u < graph.n_nodes(); ++u) {
+        // Restricted nodes: mark all out-edges impassable and skip
+        if (graph.flags()[u] & FLAG_RESTRICTED) {
+            for (uint32_t e = graph.row_ptr()[u]; e < graph.row_ptr()[u + 1]; ++e)
+                weights[e] = RoutingKit::inf_weight;
+            continue;
+        }
+
+        // Per-node constants — computed once for all out-edges of u
+        const float lat_u          = graph.lat()[u];
+        const float lon_u          = graph.lon()[u];
+        const float dist_origin_nm = maritime::haversine_nm(
+            origin_lat, origin_lon, lat_u, lon_u);
+        const float d_perp_nm = std::abs(maritime::cross_track_nm(
+            origin_lat, origin_lon, dest_lat, dest_lon, lat_u, lon_u));
+        const float d_perp_term = d_perp_nm * d_perp_nm * sp2_inv;
+
+        for (uint32_t e = graph.row_ptr()[u]; e < graph.row_ptr()[u + 1]; ++e) {
+            const uint32_t v       = graph.col_idx()[e];
+            const float    base_nm = graph.base_dist()[e];
+
+            // Canal transit: calm-water time cost, no weather blending
+            if (graph.flags()[u] & FLAG_CANAL_TRANSIT) {
+                const float t_h = base_nm / vessel.service_speed_kts;
+                const uint32_t w = static_cast<uint32_t>(
+                    std::min(t_h * SCALE, static_cast<float>(MAX_W)));
+                weights[e] = (w == 0u) ? 1u : w;
+                continue;
+            }
+
+            const float hdg = maritime::bearing_rad(lat_u, lon_u,
+                                                    graph.lat()[v], graph.lon()[v]);
+
+            float total_g    = 0.f;
+            float total_cost = 0.f;
+
+            for (int ts = 0; ts < maritime::WX_N_TIMESTEPS; ++ts) {
+                // Anisotropic Gaussian: how likely is the vessel at u at time ts?
+                const float d_along = dist_origin_nm
+                                    - static_cast<float>(ts) * vessel.service_speed_kts;
+                const float g = std::exp(
+                    -0.5f * (d_along * d_along * sa2_inv + d_perp_term));
+                if (g < 1e-6f) continue;
+
+                const std::size_t wx_idx = graph.weather_idx(u, ts);
+                const float sig_wh  = static_cast<float>(wx.sigwh[wx_idx]);
+                const float was_val = static_cast<float>(wx.was  [wx_idx]);
+                const float wad_deg = static_cast<float>(wx.wad  [wx_idx]);
+                const float pwd_deg = static_cast<float>(wx.pwd  [wx_idx]);
+
+                const float spd     = actual_speed_kts(sig_wh, was_val, wad_deg, pwd_deg,
+                                                       hdg, vessel);
+                const float penalty = maritime::weather_penalty_multiplier(sig_wh);
+                total_g    += g;
+                total_cost += g * (base_nm / spd) * penalty;
+            }
+
+            // If all Gaussians were negligible (node far outside voyage window),
+            // fall back to calm-water time so the weight is still meaningful.
+            const float blended = (total_g > 0.f)
+                ? total_cost / total_g
+                : base_nm / vessel.service_speed_kts;
+            const uint32_t w = static_cast<uint32_t>(
+                std::min(blended * SCALE, static_cast<float>(MAX_W)));
+            weights[e] = (w == 0u) ? 1u : w;
         }
     }
 
