@@ -1044,121 +1044,70 @@ The ideal state is for the CCH weight formula to be a **fast, integer approximat
 
 ### What the model does today
 
-The FOC model is a `std::function` stored inside `VesselParams` (defined in
-`lib/include/maritime/edge_weight.hpp`). It is injected at the call site before
-each route query and is intentionally decoupled from the routing engine — the
-engine never knows what vessel it is routing for, only that it can call
-`foc_model(sig_wh, wind_spd, current_comp)` to get `{speed_kts, foc_per_nm}`.
+FOC computation is fully physics-based — there is no flat-rate placeholder. Two
+components work together:
 
-The placeholder currently in use in both `route_query.cpp` and
-`voyage_router.cpp` ignores all three arguments:
+**1. Speed-loss physics (`compute_edge_cost` in [lib/include/maritime/edge_weight.hpp](lib/include/maritime/edge_weight.hpp))**
+
+Every edge traversal computes a weather-reduced vessel speed via three resistance
+models and the Kwon equal-power formula:
+
+```
+R_cw   = calm_water_resistance_kn(service_speed, vessel)    // Hollenbach ITTC 1957
+R_wave = wave_resistance_kn(sig_wh, wave_rel_deg, vessel)   // Kreitner, 8-segment angle table
+R_wind = wind_resistance_kn(wind_spd, wind_rel_deg, vessel) // Fujiwara aerodynamic
+
+sl          = speed_loss_pct(R_cw, R_wave + R_wind)         // Kwon equal-power
+actual_spd  = max(1 kt, service_speed × (1 − sl / 100))
+```
+
+Wind and wave directions are read from `wad` and `pwd` (both "going-to" convention),
+converted to "coming-from", and folded into `[0°, 180°]` relative to vessel heading —
+0° = head-on (worst), 180° = following (best).
+
+**2. Universal FOC model (`universal_foc_model` in [lib/include/maritime/foc_model.hpp](lib/include/maritime/foc_model.hpp))**
+
+Engine power is assumed constant at the service-speed operating point. SHP is
+computed from a regression formula keyed on Beaufort number, then converted to
+fuel rate via SFOC:
+
+```
+bf          = beaufort_from_ms(wind_spd)
+SHP (kW)    = B0 × (1 + A2 × bf³) × service_speed³ + C_OFFSET
+FOC (MT/h)  = SHP × SFOC / 1,000,000        // SFOC = 180 g/kWh (two-stroke diesel)
+foc_per_nm  = FOC (MT/h) / actual_spd       // actual_spd from step 1
+```
+
+The equal-power assumption means the engine burns the same fuel per hour
+regardless of sea state; heavier weather slows the vessel down, raising the
+per-nm cost while holding the per-hour burn rate constant.
+
+**Where the model is injected**
+
+Each binary wraps `universal_foc_model` in a one-line lambda:
 
 ```cpp
-vessel.foc_model = [](float /*sig_wh*/, float /*wind_spd*/, float /*current_comp*/)
-    -> std::pair<float, float>
+// voyage_router.cpp and route_query.cpp
+vessel.foc_model = [spd = speed_kts](float /*sig_wh*/, float wind_spd, float /*cur*/)
 {
-    return {12.f, 20.f / 24.f / 12.f};
-    //      ^^^^  ^^^^^^^^^^^^^^^^^^^^^
-    //      12 knots flat (speed never changes)
-    //            20 MT/day ÷ 24 h ÷ 12 kts = 0.0694 MT/nm (rate never changes)
+    return maritime::universal_foc_model(wind_spd, spd);
 };
 ```
 
-**Effect on routing:** because `speed_kts` is constant, elapsed travel time is
-proportional to distance, and `foc_per_nm` is constant, the reported FOC is
-simply proportional to the total route distance. Weather variables `sig_wh`,
-`wind_spd`, and `current_comp` are received by the function but discarded. The
-route path is influenced by weather only through the CCH weight heuristic
-(`sigwh` scaling in `weights_writer.cpp`); the reported fuel cost is
-weather-blind.
+`compute_edge_cost()` calls this lambda for the per-nm FOC rate, then divides by
+`actual_spd` (the physics-reduced speed) to get the final per-edge cost.
 
-### Where to change it
+### What is still reference-vessel only
 
-There is **one place** per binary where the model is injected:
+The regression constants in `universal_foc_model` (`B0 = 76.1`, `A2 = 6.16e-4`,
+`SFOC = 180 g/kWh`, `C_OFFSET = 2485 kW`) are derived from a single laden
+reference vessel and are baked into the source. They are not yet loaded from
+per-vessel lookup tables or calibrated against noon-report data. The speed-loss
+hull parameters in `VesselParams` (`lbp_m`, `beam_m`, `draft_m`,
+`block_coeff`, `frontal_area_m2`) default to reference values in both CLIs.
 
-| Binary | File | Line |
-|---|---|---|
-| `maritime-route-query` | `router_server/src/route_query.cpp` | `vessel.foc_model = ...` |
-| `maritime-voyage-router` | `router_server/src/voyage_router.cpp` | `vessel.foc_model = ...` |
-
-In production (via pybind11 / FastAPI) the lambda would be populated from a
-Python-side vessel model before each query, so only the binding layer changes.
-The C++ engine and `compute_edge_cost()` are unchanged.
-
-No changes are required to `lib/include/maritime/edge_weight.hpp` to improve the
-model — the function signature already receives all the necessary environmental
-inputs.
-
-### What needs to change for the future implementation
-
-The future improvements described in [Future improvements](#future-improvements)
-require two coordinated changes.
-
-#### Change 1 — Speed-loss model inside `foc_model`
-
-Replace the fixed `12.f` speed with a physics-based estimate that accounts for
-wave-induced added resistance. A minimal parametric form:
-
-```cpp
-vessel.foc_model = [](float sig_wh, float wind_spd, float current_comp)
-    -> std::pair<float, float>
-{
-    // Speed through water: starts at design speed, reduced by sea state.
-    // current_comp > 0 = following current (increases effective SOG).
-    const float design_speed  = 14.f;                      // kts, calm water
-    const float wave_penalty  = sig_wh * 0.8f;             // kts lost per metre of Hs
-    const float wind_penalty  = std::max(0.f, wind_spd - 10.f) * 0.05f;
-    const float speed_stw     = std::max(4.f, design_speed - wave_penalty - wind_penalty);
-    const float speed_sog     = speed_stw + current_comp * 1.944f; // m/s → kts
-
-    // FOC: engine works harder to overcome wave resistance → same power, less speed.
-    const float base_daily_mt = 45.f;                      // MT/day at design speed
-    // Power ~ speed³; same power at reduced speed means same daily consumption.
-    const float foc_per_nm    = base_daily_mt / 24.f / std::max(speed_sog, 1.f);
-
-    return {speed_sog, foc_per_nm};
-};
-```
-
-The parameters (`design_speed`, `wave_penalty`, `base_daily_mt`) should come
-from vessel-specific trial data or a calibrated performance model rather than
-being hardcoded.
-
-#### Change 2 — CCH weight heuristic must be updated to match
-
-Because the CCH weight formula in `weather_etl/src/weights_writer.cpp` controls
-which **path** is chosen, it must reflect the same speed-loss logic. If the FOC
-model now makes head-sea edges significantly more expensive, the CCH must also
-penalise them — otherwise the optimizer selects a path that the FOC model rates
-as poor.
-
-The weight proxy should approximate what `foc_model` would return for a typical
-transit, expressed as an integer cost. For example:
-
-```cpp
-// In WeightsWriter::compute(), replace the existing proxy line:
-// Before:
-const float proxy = base_nm * (1.f + sig_wh / 6.f);
-
-// After (consistent with the speed-loss model above):
-const float wave_penalty = sig_wh * 0.8f;
-const float speed        = std::max(4.f, 14.f - wave_penalty);
-const float foc_per_nm   = 45.f / 24.f / speed;
-const float proxy        = foc_per_nm * base_nm;
-```
-
-This makes the CCH optimization objective (minimize proxy cost) and the reported
-FOC objective (minimize `foc_per_nm × dist_nm`) consistent, so the path the
-optimizer chooses is also the path the FOC model considers cheapest.
-
-#### Summary of files to touch
-
-| Step | File | Change |
-|---|---|---|
-| Speed-loss + FOC model | `router_server/src/route_query.cpp` | Replace `foc_model` lambda |
-| Speed-loss + FOC model | `router_server/src/voyage_router.cpp` | Replace `foc_model` lambda |
-| CCH weight alignment | `weather_etl/src/weights_writer.cpp` | Update `proxy` formula to match |
-| (optional) Extra variables | `lib/include/maritime/edge_weight.hpp` | Extend `compute_edge_cost()` signature if wave period or direction is needed |
+To adapt the model to a specific vessel, update `VesselParams` and replace the
+constants in `foc_model.hpp` with values from that vessel's speed-power trials.
 
 The `VesselParams` struct and the `foc_model` signature do not need to change —
 the three existing arguments (`sig_wh`, `wind_spd`, `current_comp`) are
@@ -1340,40 +1289,12 @@ On x86-64 with AVX, `r5.large`-class server (32 vCPU, 16 GB):
 
 ## Future improvements
 
-### Speed-loss model (wave-induced resistance)
+### Vessel-specific FOC calibration
 
-The current FOC model returns a fixed `{speed_kts, foc_per_nm}` pair regardless
-of sea state. In reality, wave-induced added resistance causes a vessel to lose
-speed even when maintaining constant engine output. A vessel that is designed for
-14 knots in calm water may achieve only 11 knots in 4 m significant wave height —
-consuming the same fuel but covering less distance per hour.
-
-The fix requires replacing the flat lambda with a **polar-diagram model**:
-
-```
-speed_kts = f(engine_power, sig_wh, wave_period, heading_relative_to_waves)
-foc_per_nm = engine_power / (speed_kts * propulsive_efficiency)
-```
-
-This can be derived from a vessel's speed-power trial data and parameterised by
-wave height and encounter angle. At the graph level, edges with a significant
-tailwind or beam sea will have a lower per-nm cost than the same edge in a head
-sea — which changes not just the FOC accumulation but the **path** the CCH
-chooses, since detours around rough patches become genuinely cost-effective.
-
-### Vessel-specific FOC model
-
-The current placeholder (`20 MT/day flat at 12 kts`) is disconnected from any
-physical vessel. A real FOC model requires:
-
-- **SFOC curve** (specific fuel oil consumption, g/kWh vs engine load)
-- **Hull resistance model** (calm-water resistance as a function of speed and
-  displacement; augmented by added resistance in waves)
-- **Propeller efficiency curve** (RPM → thrust → speed through water)
-
-The `VesselParams::foc_model` callable in `edge_weight.hpp` already has the
-right signature — `(sig_wh, wind_spd, current_comp) → {speed_kts, foc_per_nm}`.
-A future implementation will populate this from a per-vessel lookup table or a
-lightweight parametric model trained on noon-report data. Once the model is in
-place, the optimizer will produce genuinely vessel-specific routes rather than
-geometric approximations.
+The speed-loss and FOC physics are fully implemented (Hollenbach + Kreitner +
+Kwon + `universal_foc_model`), but the regression constants (`B0`, `A2`, `SFOC`,
+`C_OFFSET`, hull geometry defaults) are baked in for a single reference laden
+vessel. A production system would load these from a per-vessel performance table
+and calibrate `SFOC` against the engine's actual load curve. The
+`VesselParams::foc_model` callable already accepts `(sig_wh, wind_spd,
+current_comp)` and can be swapped per-query without touching the routing engine.
