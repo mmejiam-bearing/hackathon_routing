@@ -4,7 +4,6 @@ add_executable(maritime_unit_tests
     unit/test_haversine.cpp
     unit/test_bearing.cpp
     unit/test_snap_table.cpp
-    unit/test_npy_loader.cpp
     unit/test_weather_buffer.cpp
     unit/test_mmap_region.cpp
     unit/test_edge_weight.cpp

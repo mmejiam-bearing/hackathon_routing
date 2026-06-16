@@ -14,10 +14,11 @@ namespace maritime::router_server {
 struct ServerConfig {
     std::string graph_path;
     std::string flags_path;
-    std::string snap_path;
+    std::string snap_wave_path;
+    std::string snap_wind_path;
     std::string cch_topo_path;
     std::string weights_dir;
-    std::string npy_dir;        // directory containing {var}.npy (optional — empty = skip FOC)
+    std::string avg_weather_dir; // contains <YYYY>/<MM>/<DD>/<field>.npy (optional — empty = skip FOC)
     uint32_t    poll_interval_s = 30;
 };
 

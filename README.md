@@ -1,6 +1,102 @@
 # maritime-router
 
-A C++23 global maritime route optimisation system. Computes fuel-optimal (FOC-minimising) vessel routes using a Customizable Contraction Hierarchy (CCH) graph engine, real-time NOAA GFS weather arrays, and vessel-specific performance models.
+A C++23 global maritime route optimisation system. Computes fuel-optimal (FOC-minimising) vessel routes using a Customizable Contraction Hierarchy (CCH) graph engine, daily-average NOAA GFS-Wave weather (see `average_weather_description.md`), and vessel-specific performance models.
+
+---
+
+## Quick start — run a voyage
+
+Assumes `data/artifacts/` already contains the five static artifacts
+(`graph.bin`, `flags.bin`, `snap_wave.bin`, `snap_wind.bin`, `cch_topo.bin`)
+and that the average-weather dataset is mounted at the path shown (see
+**Step-by-step: generating all artifacts** below for how to build them).
+
+### C++
+
+```bash
+# Build (Release recommended for real-data runs)
+cmake -B build_release -DCMAKE_BUILD_TYPE=Release
+cmake --build build_release -j$(nproc || sysctl -n hw.logicalcpu) \
+  --target maritime_voyage_router
+
+# Route Rotterdam → Singapore, starting 2026-06-08
+./build_release/router_server/maritime-voyage-router \
+  --graph           data/artifacts/graph.bin              \
+  --flags           data/artifacts/flags.bin              \
+  --snap-wave       data/artifacts/snap_wave.bin          \
+  --snap-wind       data/artifacts/snap_wind.bin          \
+  --cch             data/artifacts/cch_topo.bin           \
+  --avg-weather-dir /Users/mmejiam9206/exfat_mount/bearing_noaa/output \
+  --start-date      2026-06-08                            \
+  --from-lat 51.9   --from-lon 4.5                        \
+  --to-lat    1.3   --to-lon  103.8                       \
+  --out voyage.geojson
+```
+
+Expected output:
+
+```
+[voyage] Routing from (51.9, 4.5) to (1.3, 103.8) starting 2026-06-08 (average weather)
+[voyage] Day 0: 330.0 nm
+...
+[voyage] Day 27: 123.7 nm
+[voyage] Complete: 28 day(s)  total_dist=8837.0 nm  total_foc=29483.1 mt  total_time=675.7 h
+[voyage] Written: voyage.geojson
+```
+
+### Python
+
+```python
+import sys
+sys.path.insert(0, "router_server")   # so Python can find maritime_router.so
+import maritime_router as mr
+
+plan = mr.plan_voyage(
+    graph_path     = "data/artifacts/graph.bin",
+    flags_path     = "data/artifacts/flags.bin",
+    snap_wave_path = "data/artifacts/snap_wave.bin",
+    snap_wind_path = "data/artifacts/snap_wind.bin",
+    cch_topo_path  = "data/artifacts/cch_topo.bin",
+    avg_weather_dir= "/Users/mmejiam9206/exfat_mount/bearing_noaa/output",
+    start_date     = "2026-06-08",
+    origin_lat=51.9, origin_lon=4.5,
+    dest_lat=1.3,    dest_lon=103.8,
+)
+
+print(f"{len(plan.segments)} days  "
+      f"{plan.total_dist_nm:.0f} nm  "
+      f"{plan.total_foc_mt:.0f} mt FOC  "
+      f"{plan.total_time_h:.0f} h")
+# → 28 days  8837 nm  29483 mt FOC  676 h
+```
+
+Or use the script directly:
+
+```bash
+python3 scripts/plan_voyage.py \
+  --avg-weather-dir /Users/mmejiam9206/exfat_mount/bearing_noaa/output \
+  --start-date 2026-06-08 \
+  --from-lat 51.9 --from-lon 4.5 \
+  --to-lat    1.3 --to-lon  103.8 \
+  --out voyage.geojson
+```
+
+### Timing
+
+Measured on Apple M-series (Release build, `-O3 -march=native`, real dataset on external
+disk, full production graph ~2.6 M nodes / 18 M edges):
+
+| Route | Voyage days | C++ wall time | Python wall time |
+|---|---|---|---|
+| Rotterdam → Irish Sea | 3 | **35.5 s** | **39.3 s** |
+| Rotterdam → New York | 12 | **138.4 s** | ~153 s |
+| Rotterdam → Singapore | 28 | **313.6 s** | ~345 s |
+
+**~11.4 s per rolling-horizon day-period**, plus ~1.2 s fixed startup (graph mmap + CCH
+topology load). C++ and Python follow the same code path (Python calls into the same C++
+`plan_voyage()` via pybind11); the small overhead is Python interpreter startup and binding
+dispatch. Debug builds with AddressSanitizer/UBSan are 10–50× slower — always use Release
+for real-data runs.
 
 ---
 
@@ -9,29 +105,32 @@ A C++23 global maritime route optimisation system. Computes fuel-optimal (FOC-mi
 The system is split into three separate executables with distinct cadences and responsibilities. They communicate only through binary files in S3.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  graph_builder      (run once per data update — months between runs) │
-│                                                                       │
-│  GEBCO + GSHHG + OpenSeaMap + NOAA ENC + sigwh.npy                  │
-│      → graph.bin  flags.bin  snap.bin  cch_topo.bin                  │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │ S3
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  weather_etl        (run every 6 hours, triggered by EventBridge)    │
-│                                                                       │
-│  {var}.npy arrays  +  graph.bin  (for CSR structure)                 │
-│      → weights.bin  (CCH edge weight vector)                         │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │ S3
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  router_server      (long-running, high-concurrency query server)    │
-│                                                                       │
-│  mmap: graph.bin  flags.bin  snap.bin  cch_topo.bin                  │
-│  poll: weights.bin  (every 30s, atomic metric swap on new file)      │
-│      → route queries via pybind11 / FastAPI                          │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  graph_builder       (run once per data update — months between runs)         │
+│                                                                                │
+│  GEBCO + GSHHG + OpenSeaMap + NOAA ENC                                        │
+│  + sigwh.npy (wave-grid NaN mask)  + was.npy (wind-grid NaN mask)            │
+│      → graph.bin  flags.bin  snap_wave.bin  snap_wind.bin  cch_topo.bin      │
+└────────────────────────────────────┬─────────────────────────────────────────┘
+                                     │ (static artifacts — S3 / local disk)
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  weather_etl         (run for each voyage date — on demand or scheduled)      │
+│                                                                                │
+│  average-weather dataset  <YYYY>/<MM>/<DD>/{sigwh,wsh,wsp,wsd,pwd,…}.npy    │
+│  + graph.bin/flags.bin/snap_*.bin                                              │
+│      → weights.bin  (CCH edge weight vector, base_epoch = midnight UTC date) │
+└────────────────────────────────────┬─────────────────────────────────────────┘
+                                     │ (weights.bin — S3 / local disk)
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  router_server       (long-running query server)                               │
+│                                                                                │
+│  mmap: graph.bin  flags.bin  snap_wave.bin  snap_wind.bin  cch_topo.bin      │
+│  poll: weights.bin   (atomic metric swap on new file)                          │
+│  load: average-weather/<YYYY>/<MM>/<DD>/ keyed by weights.bin's base_epoch   │
+│      → route queries via pybind11 (maritime_router.RoutingEngine)             │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ![Offline Build Pipeline](diagrams/01_offline_build_pipeline.svg)
@@ -43,10 +142,10 @@ The three programs have incompatible runtime characteristics:
 | Program | Cadence | CPU profile | Memory |
 |---|---|---|---|
 | `graph_builder` | Months | CPU-bound for minutes–hours | Ephemeral |
-| `weather_etl` | Every 6 hours, ~minutes | I/O + compute burst | Ephemeral |
+| `weather_etl` | Per voyage date (on demand / scheduled) | I/O + compute burst | Ephemeral |
 | `router_server` | Always running | Low CPU, high concurrency | ~2.2 GB resident |
 
-The graph builder has no business being in the query server's process. The weather ETL has no business reading `.npy` files inside the query server. Each program does exactly one job.
+The graph builder has no business being in the query server's process. The weather ETL has no business reading raw weather files inside the query server. Each program does exactly one job.
 
 ![Runtime Memory Layout](diagrams/02_runtime_memory_layout.svg)
 
@@ -80,17 +179,17 @@ maritime-router/
 │       ├── gebco_loader.hpp/cpp   GEBCO NetCDF bathymetry
 │       ├── gshhg_masker.hpp/cpp   GSHHG land polygon masking
 │       ├── canal_injector.hpp/cpp Hardcoded strait and canal waypoint chains
-│       ├── snap_table_builder.hpp/cpp  Weather grid NaN → nearest-ocean EDT
+│       ├── snap_table_builder.hpp/cpp  BFS nearest-ocean for each weather grid
 │       ├── cch_preprocessor.hpp/cpp   RoutingKit CCH topology build + save
 │       ├── graph_serialiser.hpp/cpp   Write graph.bin and flags.bin
 │       └── graph_builder.hpp    Public interface (BuildConfig + run())
 │
 ├── weather_etl/
 │   ├── CMakeLists.txt           Static library — no main(); called from Python
-│   ├── etl.py                   Python ETL entry point (EventBridge-triggered)
+│   ├── etl.py                   Python ETL entry point (S3 or local mode)
 │   └── src/
-│       ├── npy_loader.hpp/cpp   Read .npy float16 arrays, skip ETL duplicate
-│       └── weights_writer.hpp/cpp  Compute + serialise weights.bin
+│       ├── avg_weather_loader.hpp/cpp  Load one day's average weather → WeatherBuffer
+│       └── weights_writer.hpp/cpp     Compute + serialise weights.bin
 │
 ├── router_server/
 │   ├── CMakeLists.txt
@@ -107,7 +206,6 @@ maritime-router/
     │   ├── test_haversine.cpp
     │   ├── test_bearing.cpp
     │   ├── test_snap_table.cpp
-    │   ├── test_npy_loader.cpp
     │   ├── test_weather_buffer.cpp
     │   ├── test_mmap_region.cpp
     │   ├── test_edge_weight.cpp
@@ -134,7 +232,8 @@ sudo apt-get install zlib1g-dev libnetcdf-dev libgdal-dev cmake
 # Data directories expected by the commands below
 data/gebco/GEBCO_2023.nc          # GEBCO 2023 global bathymetry NetCDF
 data/gshhg/GSHHS_shp/h/           # GSHHG high-resolution shapefiles
-data/weather/2026_06_08_12/       # one subdirectory per 6-hour NOAA forecast cycle
+/path/to/average-weather/          # daily-average dataset (see average_weather_description.md)
+                                   # layout: <YYYY>/<MM>/<DD>/<field>.npy, float64
 ```
 
 ### Step 1 — Build all targets
@@ -164,41 +263,56 @@ nested dissection over 700 K+ nodes.
 
 ```bash
 ./build/graph_builder/maritime-graph-builder \
-  --gebco  data/gebco/GEBCO_2023.nc   \
-  --gshhg  data/gshhg/GSHHS_shp/h    \
-  --sigwh  data/weather/2026_06_08_12/sigwh.npy \
+  --gebco  data/gebco/GEBCO_2023.nc     \
+  --gshhg  data/gshhg/GSHHS_shp/h      \
+  --sigwh  /path/to/average-weather/2024/06/15/sigwh.npy \
+  --was    /path/to/average-weather/2024/06/15/was.npy   \
   --out    data/artifacts/
 ```
 
-Produces four files in `data/artifacts/`:
+Produces five files in `data/artifacts/`:
 
 | File | Size | Contents |
 |---|---|---|
 | `graph.bin` | ~54 MB | CSR graph: lat/lon/depth per node, row_ptr/col_idx/base_dist per edge |
 | `flags.bin` | ~715 KB | Per-node bitmask (ECA, TSS, restricted zones, canal transit) |
-| `snap.bin` | ~4 MB | Weather-grid snap table (BFS nearest-ocean redirect) |
+| `snap_wave.bin` | ~3.4 MB | Wave-grid (621×1440) BFS nearest-ocean snap table |
+| `snap_wind.bin` | ~4.0 MB | Wind-grid (721×1440) BFS nearest-ocean snap table |
 | `cch_topo.bin` | ~2.8 MB | RoutingKit CCH node order vector |
+
+`snap_wave.bin` and `snap_wind.bin` can also be built without a full graph rebuild
+using the standalone `maritime-snap-builder` binary:
+
+```bash
+./build/graph_builder/maritime-snap-builder \
+  --sigwh    /path/to/average-weather/2024/06/15/sigwh.npy \
+  --was      /path/to/average-weather/2024/06/15/was.npy   \
+  --out-wave data/artifacts/snap_wave.bin                   \
+  --out-wind data/artifacts/snap_wind.bin
+```
 
 Add `--no-restrictions` to disable the default Arctic passage restrictions
 (useful for debugging; produces an unrealistic but unrestricted routing graph).
 
-### Step 3 — Compute edge weights for a forecast cycle
+### Step 3 — Compute edge weights for a voyage date
 
-Run once per 6-hour NOAA cycle. Fast (~seconds).
+Run once per voyage date before serving single-query lookups. Fast (~seconds).
+The resulting `weights.bin` encodes `base_epoch` = midnight UTC of `--date`,
+which `router_server` uses to derive which day's average weather to load.
 
 ```bash
 ./build/weather_etl/maritime-weights-writer \
-  --graph  data/artifacts/graph.bin  \
-  --flags  data/artifacts/flags.bin  \
-  --snap   data/artifacts/snap.bin   \
-  --npy    data/weather/2026_06_08_12 \
-  --out    data/artifacts/weights.bin \
-  --epoch  $(date +%s)
+  --graph           data/artifacts/graph.bin     \
+  --flags           data/artifacts/flags.bin     \
+  --snap-wave       data/artifacts/snap_wave.bin \
+  --snap-wind       data/artifacts/snap_wind.bin \
+  --avg-weather-dir /path/to/average-weather     \
+  --date            2026-06-08                   \
+  --out             data/artifacts/weights.bin
 ```
 
-The `--step N` flag selects which hour `[0..23]` of the 24-hour forecast to use
-as the reference sea state for CCH edge weights (default: 0, i.e. the start of
-the cycle).
+The `--step N` flag selects which hour `[0..23]` of the 24-hour buffer to use
+as the reference sea state for CCH edge weights (default: 0).
 
 ### Step 4a — Single-query smoke test
 
@@ -206,42 +320,196 @@ Confirms the artifacts are self-consistent and the graph is routable.
 
 ```bash
 ./build/router_server/maritime-route-query \
-  --graph    data/artifacts/graph.bin   \
-  --flags    data/artifacts/flags.bin   \
-  --snap     data/artifacts/snap.bin    \
-  --cch      data/artifacts/cch_topo.bin \
-  --weights  data/artifacts             \
-  --npy      data/weather/2026_06_08_12 \
-  --from-lat 51.9  --from-lon 4.5       \
-  --to-lat    1.3  --to-lon  103.8
+  --graph           data/artifacts/graph.bin     \
+  --flags           data/artifacts/flags.bin     \
+  --snap-wave       data/artifacts/snap_wave.bin \
+  --snap-wind       data/artifacts/snap_wind.bin \
+  --cch             data/artifacts/cch_topo.bin  \
+  --weights         data/artifacts               \
+  --avg-weather-dir /path/to/average-weather     \
+  --from-lat 51.9   --from-lon 4.5               \
+  --to-lat    1.3   --to-lon  103.8
 ```
 
 Prints waypoint count, total distance (nm), and FOC (MT), then outputs a
-`lat,lon` CSV suitable for GeoJSON conversion.
+`lat,lon` CSV suitable for GeoJSON conversion. The weather loaded for FOC
+reporting is keyed to the date encoded in `weights.bin`'s `base_epoch`.
 
 ### Step 4b — Rolling-horizon multi-day voyage
 
-Produces a full voyage GeoJSON with per-day segments. Pass one `--npy` per
-available forecast cycle, in chronological order. When the vessel's simulated
-travel time exceeds the available forecast horizon, the last forecast is reused
-until the destination is reached (see [Rolling-horizon weather routing](#rolling-horizon-weather-routing)).
+Produces a full voyage GeoJSON with per-day segments. For each day, the date
+is computed as `start-date + N days` and that day's average weather is loaded
+(mapped onto the 2024 dataset — see `average_weather_description.md`).
 
 ```bash
 ./build/router_server/maritime-voyage-router \
-  --graph    data/artifacts/graph.bin      \
-  --flags    data/artifacts/flags.bin      \
-  --snap     data/artifacts/snap.bin       \
-  --cch      data/artifacts/cch_topo.bin   \
-  --npy      data/weather/2026_06_08_12    \
-  --npy      data/weather/2026_06_09_12    \
-  --npy      data/weather/2026_06_10_12    \
-  --from-lat 51.9  --from-lon 4.5          \
-  --to-lat    1.3  --to-lon  103.8         \
-  --speed    12.0                          \
+  --graph           data/artifacts/graph.bin     \
+  --flags           data/artifacts/flags.bin     \
+  --snap-wave       data/artifacts/snap_wave.bin \
+  --snap-wind       data/artifacts/snap_wind.bin \
+  --cch             data/artifacts/cch_topo.bin  \
+  --avg-weather-dir /path/to/average-weather     \
+  --start-date      2026-06-08                   \
+  --from-lat 51.9   --from-lon 4.5               \
+  --to-lat    1.3   --to-lon  103.8              \
+  --speed    12.0                                \
   --out      voyage_rolling.geojson
 ```
 
 ![Route Query Flow](diagrams/03_query_flow.svg)
+
+---
+
+## Python bindings
+
+The CLI binaries above (`maritime-route-query`, `maritime-voyage-router`) are
+thin wrappers over the same C++ engine that's also exposed to Python via two
+pybind11 extension modules. The bindings call the production code directly —
+they do not reimplement anything — so a route computed from Python and a
+route computed from the CLI for the same inputs are identical.
+
+| Module | Source | Wraps |
+|---|---|---|
+| `maritime_router` | `router_server/python/bindings.cpp` | `RoutingEngine` / `QueryServer` (single query) and `plan_voyage()` (rolling multi-day) |
+| `maritime_weather_etl` | `weather_etl/python/bindings.cpp` | `StaticGraph` and `WeightsWriter` (offline CCH weight computation) |
+
+Both **minimise for weather and fuel consumption (FOC), not just distance**.
+The CCH metric that the route is computed against is customised from the
+vessel's weather-adjusted **speed loss** at every edge — see
+[Weather in edge cost calculations](#weather-in-edge-cost-calculations) for
+the formulas. Concretely:
+
+- Each edge's traversal time is `distance / actual_speed`, where `actual_speed`
+  is the vessel's service speed reduced by the Hollenbach calm-water
+  resistance, Kreitner wave resistance, and Fujiwara wind resistance at that
+  edge's sea state (`lib/include/maritime/edge_weight.hpp`,
+  `compute_edge_cost()` / `actual_speed_kts()`).
+- FOC is `universal_foc_model()` evaluated at that same weather-adjusted
+  speed, so heavy weather costs more nm⁻¹ both because the vessel is slower
+  *and* because of the cubic power-speed relationship.
+- For the rolling-horizon voyage planner, the CCH is re-customised once per
+  forecast period with `WeightsWriter::compute_blended()`, which integrates
+  this speed-loss cost over all 24 forecast timesteps, weighted by an
+  anisotropic Gaussian over where the vessel is likely to be — so the CCH
+  doesn't just optimise for *today's* weather along the great-circle route,
+  it accounts for where the storm is forecast to move while the vessel is
+  still en route (see [Temporal weight blending](#temporal-weight-blending)).
+
+Both modules build as part of the normal `cmake --build build` and are
+written to the same directory as their `bindings.cpp` (`router_server/` and
+`weather_etl/` respectively), so Python scripts that live under `scripts/`
+need only add that directory to `sys.path` — no `pip install` or packaging
+step required. `pybind11` itself is fetched by CMake (see root
+`CMakeLists.txt`); building the modules requires the same Python headers
+`pybind11` needs (`python3-config --includes` must succeed).
+
+```bash
+cmake --build build --target maritime_router_python maritime_weather_etl_python
+```
+
+### Single-shot routing — `scripts/route.py`
+
+Routes from one lat/lon to another against the currently customised CCH
+metric, returning the waypoint geometry **and** the weather sampled at each
+leg (the same values that drove the speed-loss/FOC cost for that leg):
+
+```bash
+python3 scripts/route.py \
+  --from-lat 51.9 --from-lon 4.5 \
+  --to-lat    1.3 --to-lon  103.8 \
+  --weights-dir data/artifacts \
+  --avg-weather-dir /path/to/average-weather
+```
+
+Or directly from Python:
+
+```python
+import sys
+sys.path.insert(0, "router_server")
+import maritime_router as mr
+
+engine = mr.RoutingEngine(
+    graph_path="data/artifacts/graph.bin",
+    flags_path="data/artifacts/flags.bin",
+    snap_wave_path="data/artifacts/snap_wave.bin",
+    snap_wind_path="data/artifacts/snap_wind.bin",
+    cch_topo_path="data/artifacts/cch_topo.bin",
+    weights_dir="data/artifacts",                      # must contain weights.bin
+    avg_weather_dir="/path/to/average-weather",         # optional; enables FOC + weather samples
+)
+
+result = engine.route(
+    origin_lat=51.9, origin_lon=4.5,
+    dest_lat=1.3,    dest_lon=103.8,
+    service_speed_kts=14.0,
+)
+
+result.status                                 # mr.Status.OK / NO_ROUTE / WEATHER_UNAVAILABLE
+result.waypoint_lat, result.waypoint_lon      # numpy arrays, one entry per waypoint
+result.sig_wh, result.wind_spd, result.wind_dir  # weather sampled per edge
+result.wave_dir
+result.total_dist_nm, result.total_foc_mt, result.total_time_h
+```
+
+`RoutingEngine` snaps each endpoint to its nearest graph node, then runs the
+same `CchQueryState` query the server uses. `weights_dir` must contain a
+`weights.bin` written by `weather_etl` (Step 3 above). `avg_weather_dir` is
+optional — omit it to route on the CCH metric alone, with FOC totals and
+weather samples left empty. When supplied, the weather date is derived from
+`weights.bin`'s `base_epoch` (see Step 3).
+
+### Rolling-horizon multi-day voyage — `scripts/plan_voyage.py`
+
+The Python equivalent of `maritime-voyage-router`: loads average weather
+day-by-day as the vessel progresses, re-customises the CCH for each day, and
+advances the vessel ~24h per period until the destination is reached (see
+[Rolling-horizon weather routing](#rolling-horizon-weather-routing)).
+
+```bash
+python3 scripts/plan_voyage.py \
+  --avg-weather-dir /path/to/average-weather \
+  --start-date 2026-06-08 \
+  --from-lat 40.7 --from-lon -74.0 \
+  --to-lat   51.5 --to-lon   -0.1 \
+  --speed 14 \
+  --out /tmp/rolling_calm.geojson
+```
+
+`mr.plan_voyage(...)` returns a `VoyagePlan` with `.segments` (one
+`DaySegment` per ~24h period: `.day`, `.dist_nm`, `.foc_mt`, `.time_h`,
+`.lat`/`.lon` waypoint arrays), plus `.total_dist_nm`, `.total_foc_mt`,
+`.total_time_h`, and `.reached_destination`. The GeoJSON it writes is
+byte-for-byte the same format `maritime-voyage-router --out` writes, so
+`scripts/plot_rolling_voyage.py` consumes either one's output interchangeably.
+
+### Weather ETL bindings — `maritime_weather_etl`
+
+For the offline weight-computation side (`weather_etl/etl.py`):
+
+```python
+import sys
+sys.path.insert(0, "weather_etl")
+import maritime_weather_etl as mwe
+
+graph = mwe.StaticGraph(
+    "data/artifacts/graph.bin",
+    "data/artifacts/flags.bin",
+    "data/artifacts/snap_wave.bin",
+    "data/artifacts/snap_wind.bin",
+)
+# Load one day's average weather (mapped onto the 2024 dataset)
+wx = mwe.load_avg_weather_buffer(
+    "/path/to/average-weather", year=2026, month=6, day=8,
+    base_epoch=1780876800)                      # midnight UTC of 2026-06-08
+weights = mwe.WeightsWriter.compute(graph, wx, ref_time_step=0)   # uint32 numpy array
+mwe.WeightsWriter.write(weights, base_epoch=1780876800,
+                         out_path="data/artifacts/weights.bin")
+```
+
+This is the vessel-agnostic proxy weight (distance × wave-height factor) used
+to seed the CCH offline, per
+[CCH weight heuristic — path selection](#1-cch-weight-heuristic--path-selection) —
+not the per-vessel speed-loss cost `maritime_router` uses at query time.
 
 ---
 
@@ -349,11 +617,9 @@ A log message marks the handover:
 [voyage] Forecast exhausted after day 7 — extending with last available weather.
 ```
 
-This means a 30-day voyage with 8 forecast cycles (days 0–7) uses real forecast
-data for the first 8 days and extends the Jun 15 sea state for the remaining
-~22 days. The path chosen during the extended period is still optimal given
-those conditions — the CCH is not re-customized again since the weights have
-not changed.
+With the average-weather dataset, every day has its own distinct snapshot (keyed
+by month/day, mapped onto 2024's values). No "forecast exhaustion" occurs —
+the daily lookup always resolves to a real snapshot for that calendar day.
 
 ### Why path diversity appears
 
@@ -687,7 +953,7 @@ Weather influences routing at **two separate points** in the pipeline with diffe
 
 **File:** `weather_etl/src/weights_writer.cpp`, function `WeightsWriter::compute()`
 
-**When it runs:** offline, once per 6-hour forecast cycle (or once per day in the rolling-horizon router)
+**When it runs:** offline, once per voyage date (or once per day in the rolling-horizon router)
 
 **Formula:**
 ```cpp
@@ -767,9 +1033,9 @@ The ideal state is for the CCH weight formula to be a **fast, integer approximat
 |---|---|---|
 | **File** | `weather_etl/src/weights_writer.cpp` | `lib/include/maritime/edge_weight.hpp` |
 | **Output type** | `uint32_t` (integer, RoutingKit-compatible) | `float` (MT of fuel) |
-| **Runs** | Offline, once per forecast cycle | At query time, per edge in path |
+| **Runs** | Offline, once per voyage date | At query time, per edge in path |
 | **Controls** | Which path is chosen | What the path costs |
-| **Weather variables** | `sigwh` (currently) | `sigwh`, `was`, `ocs_u`, `ocs_v` |
+| **Weather variables** | `sigwh`, `was`, `wad`, `pwd` | `sigwh`, `was`, `wad`, `pwd` |
 | **Extension point** | Edit proxy formula directly | Replace `VesselParams::foc_model` lambda |
 
 ---
@@ -914,18 +1180,19 @@ See `AGENTS.md` for the full enforcement rules.
 
 ## Weather grid
 
-Confirmed from inspection of the actual `sigwh.npy` file:
+Two distinct grids, both **south-first** (row 0 = south), 0.25° resolution,
+lon 0→359.75°E — see `average_weather_description.md`:
 
 ```
-Shape:      (721, 1440)   lat 90°N → 90°S, lon 0° → 359.75°E
-Dtype:      float16       ~2 MB per variable per timestep
-Timesteps:  24 hourly steps per 6-hour NOAA cycle
-NaN:        land mask — redirected via snap table, never left as NaN
+Wave grid    sigwh, wsh, wsp, wsd, pwd, swell_residual    (621, 1440)   -75°..+80°
+Wind grid    was, wad                                      (721, 1440)   -90°..+90°
+Dtype:       float64 on disk (average dataset) → float16 in WeatherBuffer
+NaN:         land mask — redirected via snap_wave.bin / snap_wind.bin, never left as NaN
+Timesteps:   24 slots per WeatherBuffer (daily average broadcast uniformly)
 ```
 
-Total per `WeatherBuffer`: ~760 MB (14 variables × 24 timesteps × 1,038,240 × 2 bytes).
-
-**ETL double-write bug:** every `.npy` file contains the array written twice (confirmed: file size = `2 × n_elements × 2` bytes). All C++ loaders read only the first `WX_N_POINTS` elements. Fix the ETL before fixing the loaders — they are coordinated.
+Total per `WeatherBuffer`: wave fields (6 × 24 × 894,240 × 2 bytes) + wind fields
+(2 × 24 × 1,038,240 × 2 bytes) ≈ 340 MB.
 
 **Narrow-strait coverage** — at 0.25° resolution (~28 km/cell), several chokepoints fall on land cells:
 
@@ -964,15 +1231,19 @@ FLAG_CANAL_TRANSIT  0x08   Enclosed waterway — suppress weather lookup
 FLAG_LOW_CONF_WX    0x10   Snap distance >2 cells — warn in API response
 ```
 
-### `snap.bin`
+### `snap_wave.bin` / `snap_wind.bin`
+
+Two snap tables, one per weather grid. Same binary layout:
 
 ```
-[SnapHeader: magic=0x50414E53 "SNAP", version=1, n_lat=721, n_lon=1440]
-[uint16  snap_lat[721 × 1440]]
-[uint16  snap_lon[721 × 1440]]
+[SnapHeader: magic=0x50414E53 "SNAP", version=1, n_lat, n_lon]
+[uint16  snap_lat[n_lat × n_lon]]
+[uint16  snap_lon[n_lat × n_lon]]
 ```
 
-Built from `sigwh.npy` NaN mask using BFS nearest-ocean. Identity for ocean cells.
+`snap_wave.bin`: n_lat=621, n_lon=1440 — built from `sigwh.npy` NaN mask.
+`snap_wind.bin`: n_lat=721, n_lon=1440 — built from `was.npy` NaN mask.
+BFS nearest-ocean; identity for cells that are already ocean.
 
 ### `cch_topo.bin`
 
@@ -1058,7 +1329,7 @@ On x86-64 with AVX, `r5.large`-class server (32 vCPU, 16 GB):
 ## Limitations
 
 - **Platform:** Linux only (`mmap`, `MAP_POPULATE`).
-- **Weather horizon:** 24 hourly timesteps per forecast cycle. Routes longer than 24 hours clamp to the last timestep within a cycle; the rolling-horizon router mitigates this by loading successive cycles. Extend `WX_N_TIMESTEPS` and regenerate for longer intra-cycle forecasts (GFS provides up to 384 hours in raw GRIB2).
+- **Weather resolution:** daily-average energy-weighted snapshots — no intra-day variation. All 24 hourly slots in `WeatherBuffer` are filled with the same daily value; finer temporal resolution would require reprocessing the source data.
 - **Bathymetry resolution:** GEBCO at 0.25° (~28 km) for open ocean; NOAA ENC at chart resolution for US waters. Outside US ENC coverage, coastal depth accuracy degrades.
 - **float16 compiler support:** requires `_Float16`, available in GCC ≥ 12 and Clang ≥ 15 on x86-64 with `-march=native`.
 - **RoutingKit commit pin:** no versioned releases exist. Pin is in `CMakeLists.txt`. Update deliberately, not automatically.

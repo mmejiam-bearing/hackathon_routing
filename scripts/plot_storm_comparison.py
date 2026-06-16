@@ -19,16 +19,22 @@ try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     import numpy as np
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
 except ImportError:
-    sys.exit("Install matplotlib and numpy: pip install matplotlib numpy")
+    sys.exit("Install matplotlib, numpy and cartopy: pip install matplotlib numpy cartopy")
+
+GEO = ccrs.PlateCarree()
 
 
 def load_coords(geojson_path: str):
     with open(geojson_path) as f:
         gj = json.load(f)
     lons, lats = [], []
+    props = {}
     for feature in gj["features"]:
         geom = feature["geometry"]
+        props = feature.get("properties", props)
         if geom["type"] == "LineString":
             for lon, lat in geom["coordinates"]:
                 lons.append(lon)
@@ -38,7 +44,15 @@ def load_coords(geojson_path: str):
                 for lon, lat in line:
                     lons.append(lon)
                     lats.append(lat)
-    return lons, lats
+    return lons, lats, props
+
+
+def route_label(props: dict) -> str:
+    dist = props.get("total_dist_nm")
+    time_h = props.get("total_time_h")
+    if dist is None or time_h is None:
+        return ""
+    return f"{dist:,.0f} nm, {time_h / 24:.1f} days"
 
 
 def main():
@@ -53,12 +67,23 @@ def main():
     parser.add_argument("--storm-lon-max", type=float, default=-10.0)
     args = parser.parse_args()
 
-    calm_lons,  calm_lats  = load_coords(args.calm)
-    storm_lons, storm_lats = load_coords(args.storm)
+    calm_lons,  calm_lats,  calm_props  = load_coords(args.calm)
+    storm_lons, storm_lats, storm_props = load_coords(args.storm)
+    calm_label  = route_label(calm_props)
+    storm_label = route_label(storm_props)
 
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.set_facecolor("#d0e8f5")
+    fig = plt.figure(figsize=(14, 7))
+    ax  = fig.add_subplot(1, 1, 1, projection=GEO)
     fig.patch.set_facecolor("#1a1a2e")
+
+    ax.set_extent([-90, 20, 10, 75], crs=GEO)
+    ax.add_feature(cfeature.OCEAN.with_scale("50m"), facecolor="#d0e8f5", zorder=0)
+    ax.add_feature(cfeature.LAND.with_scale("50m"), facecolor="#3a3a3a", zorder=1)
+    ax.add_feature(cfeature.COASTLINE.with_scale("50m"), edgecolor="#888888",
+                    linewidth=0.6, zorder=1)
+    gl = ax.gridlines(draw_labels=True, color="white", alpha=0.3, linestyle=":")
+    gl.top_labels = gl.right_labels = False
+    gl.xlabel_style = gl.ylabel_style = {"color": "white", "fontsize": 9}
 
     # Storm box
     box_w = args.storm_lon_max - args.storm_lon_min
@@ -68,6 +93,7 @@ def main():
         boxstyle="round,pad=0.5",
         linewidth=2, edgecolor="red", facecolor="#ff000033",
         zorder=2, label="Synthetic storm (sigwh=15 m, wind=45 m/s)",
+        transform=GEO,
     )
     ax.add_patch(storm_rect)
     ax.text(
@@ -75,24 +101,21 @@ def main():
         (args.storm_lat_min + args.storm_lat_max) / 2,
         "STORM\nSIGWH 15 m\nWIND 45 m/s",
         ha="center", va="center", fontsize=9, color="white",
-        fontweight="bold", zorder=3,
+        fontweight="bold", zorder=3, transform=GEO,
     )
 
     # Routes
-    ax.plot(calm_lons,  calm_lats,  "c-",  lw=2.5, zorder=4, label="Calm route  (3 379 nm, 12 days)")
-    ax.plot(storm_lons, storm_lats, "y--", lw=2.5, zorder=4, label="Storm route (5 750 nm, 20 days)")
+    ax.plot(calm_lons,  calm_lats,  "c-",  lw=2.5, zorder=4,
+             label=f"Calm route  ({calm_label})", transform=GEO)
+    ax.plot(storm_lons, storm_lats, "y--", lw=2.5, zorder=4,
+             label=f"Storm route ({storm_label})", transform=GEO)
 
     # Origin / destination markers
-    ax.plot(-74.0, 40.7, "wo", ms=8, zorder=5)
-    ax.text(-74.0, 40.7 - 1.5, "New York", ha="center", color="white", fontsize=8)
-    ax.plot(-0.1,  51.5, "wo", ms=8, zorder=5)
-    ax.text(-0.1,  51.5 + 1.5, "London",   ha="center", color="white", fontsize=8)
+    ax.plot(-74.0, 40.7, "wo", ms=8, zorder=5, transform=GEO)
+    ax.text(-74.0, 40.7 - 1.5, "New York", ha="center", color="white", fontsize=8, transform=GEO)
+    ax.plot(-0.1,  51.5, "wo", ms=8, zorder=5, transform=GEO)
+    ax.text(-0.1,  51.5 + 1.5, "London",   ha="center", color="white", fontsize=8, transform=GEO)
 
-    ax.set_xlim(-90, 20)
-    ax.set_ylim(10, 75)
-    ax.set_xlabel("Longitude", color="white")
-    ax.set_ylabel("Latitude",  color="white")
-    ax.tick_params(colors="white")
     for spine in ax.spines.values():
         spine.set_edgecolor("white")
 
@@ -100,8 +123,7 @@ def main():
     ax.set_title("Maritime re-routing due to synthetic North Atlantic storm",
                  color="white", fontsize=12, pad=12)
 
-    plt.tight_layout()
-    plt.savefig(args.out, dpi=150, facecolor=fig.get_facecolor())
+    plt.savefig(args.out, dpi=150, facecolor=fig.get_facecolor(), bbox_inches="tight")
     print(f"Saved: {args.out}")
 
 

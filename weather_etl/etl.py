@@ -2,168 +2,79 @@
 """
 weather_etl/etl.py
 
-Scheduled job: runs every 6 hours, triggered by EventBridge.
-Downloads processed .npy weather arrays from S3, computes CCH edge weights,
-writes weights.bin, uploads back to S3 for router_server to pick up.
+Scheduled job: computes CCH edge weights for one calendar voyage date and
+writes weights.bin for router_server to consume.
 
-TODO: replace compute_weights_python() with a pybind11 call to
-      maritime_weather_etl.WeightsWriter.compute() once bindings exist.
-      The C++ version is orders of magnitude faster for ~18M edges.
+The weather source is the daily-average dataset (see
+average_weather_description.md): one energy-averaged snapshot per day,
+computed once for 2024 and mapped onto any real calendar date by matching
+month/day (2024 is a leap year, so every date — including Feb 29 — resolves).
+There is no live forecast cycle to poll anymore; --date selects which day's
+average weather to use.
+
+Delegates all graph loading, weather loading, and weight computation to the
+maritime_weather_etl pybind11 bindings (see weather_etl/python/bindings.cpp),
+which forward to the same C++ implementation used by the maritime-weights-
+writer CLI and router_server's plan_voyage(). This script does not
+reimplement any of that logic in Python.
 """
 
 import argparse
+import datetime
 import logging
-import struct
 import tempfile
 import time
 from pathlib import Path
 
 import boto3
-import numpy as np
+
+import maritime_weather_etl as mwe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-VARIABLES = [
-    "sigwh", "pwh", "pwp", "pwd",
-    "pswh", "pswp", "pswd",
-    "wsh",  "wsp",
-    "was",  "wad", "wsd",
-    "ocs",  "sst",
-]
+# The 8 fields the average-weather dataset publishes per day — see
+# average_weather_description.md Section 3. Wave grid: sigwh, wsh, wsp, wsd,
+# pwd, swell_residual (621x1440). Wind grid: was, wad (721x1440).
+AVG_WEATHER_FIELDS = ["sigwh", "wsh", "wsp", "wsd", "pwd", "swell_residual", "was", "wad"]
 
-WEIGHTS_MAGIC   = 0x54484757   # "WGHT" LE — must match WeightsHeader in C++
-WEIGHTS_VERSION = 1
+ARTIFACT_FILES = ["graph.bin", "flags.bin", "snap_wave.bin", "snap_wind.bin"]
 
 
-def fetch_npy_files(s3: object, bucket: str, prefix: str, local_dir: Path) -> list[str]:
-    paginator = s3.get_paginator("list_objects_v2")
-    fetched = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".npy"):
-                continue
-            dest = local_dir / Path(key).name
-            s3.download_file(bucket, key, str(dest))
-            fetched.append(str(dest))
-            log.info("Downloaded %s", key)
-    return fetched
+def fetch_artifacts(s3: object, bucket: str, prefix: str, local_dir: Path) -> dict:
+    """Downloads graph.bin/flags.bin/snap_wave.bin/snap_wind.bin from
+    s3://bucket/prefix/<file> into local_dir. Returns a dict of local paths."""
+    paths = {}
+    for name in ARTIFACT_FILES:
+        dest = local_dir / name
+        s3.download_file(bucket, f"{prefix.rstrip('/')}/{name}", str(dest))
+        paths[name] = str(dest)
+        log.info("Downloaded %s/%s", prefix, name)
+    return paths
 
 
-def load_graph_csr(graph_bin_path: str) -> dict:
-    """
-    Minimal binary reader for graph.bin.
-    Matches the GraphHeader layout in lib/include/maritime/static_graph.hpp.
-    """
-    with open(graph_bin_path, "rb") as f:
-        magic, version, n_nodes, n_edges = struct.unpack("<IIII", f.read(16))
-    if magic != 0x4752414D:
-        raise ValueError(f"Bad graph.bin magic: 0x{magic:08X}")
-
-    dtype_map = {
-        "lat":          ("float32", n_nodes),
-        "lon":          ("float32", n_nodes),
-        "depth":        ("float16", n_nodes),
-        "row_ptr":      ("uint32",  n_nodes + 1),
-        "col_idx":      ("uint32",  n_edges),
-        "base_dist_nm": ("float32", n_edges),
-    }
-
-    result = {"n_nodes": n_nodes, "n_edges": n_edges}
-    offset = 16
-    with open(graph_bin_path, "rb") as f:
-        f.seek(offset)
-        for name, (dtype, count) in dtype_map.items():
-            result[name] = np.frombuffer(f.read(count * np.dtype(dtype).itemsize), dtype=dtype).copy()
-
-    return result
+def fetch_avg_weather_day(
+    s3: object, bucket: str, prefix: str, local_dir: Path,
+    year: int, month: int, day: int,
+) -> None:
+    """Downloads one calendar day's 8 average-weather fields, mapped onto
+    2024 (the only year the dataset covers), into
+    local_dir/2024/<MM>/<DD>/<field>.npy — the layout AvgWeatherLoader
+    expects."""
+    mm, dd = f"{month:02d}", f"{day:02d}"
+    dest_dir = local_dir / "2024" / mm / dd
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for field in AVG_WEATHER_FIELDS:
+        dest = dest_dir / f"{field}.npy"
+        key = f"{prefix.rstrip('/')}/2024/{mm}/{dd}/{field}.npy"
+        s3.download_file(bucket, key, str(dest))
+        log.info("Downloaded %s", key)
+    log.info("Fetched average weather for %04d-%02d-%02d (mapped onto 2024-%s-%s)",
+              year, month, day, mm, dd)
 
 
-def compute_weights(
-    graph: dict,
-    sigwh: np.ndarray,
-    was: np.ndarray,
-    wad: np.ndarray,
-) -> np.ndarray:
-    """
-    Proxy FOC cost: distance × (1 + sigwh/3 + headwind_factor), scaled to uint32.
-    Matches WeightsWriter::compute() in weather_etl/src/weights_writer.cpp.
-
-    headwind_factor = max(0, -was · cos(hdg - wad_rad)) / WIND_REF_SPEED
-    where hdg is the great-circle bearing from source to dest node and
-    wad uses the "going-to" convention (0° = North, 90° = East).
-
-    NOTE: this is O(n_edges) in pure Python — ~18M iterations for a global
-    0.25° graph. Replace with pybind11 call to C++ when bindings exist.
-    """
-    import math
-
-    n_edges = graph["n_edges"]
-    weights = np.empty(n_edges, dtype=np.uint32)
-
-    row_ptr      = graph["row_ptr"]
-    col_idx      = graph["col_idx"]
-    base_dist_nm = graph["base_dist_nm"]
-    lat_arr      = graph["lat"]
-    lon_arr      = graph["lon"]
-
-    SCALE          = 1000.0
-    MAX_W          = 0xFFFFFFFE
-    WIND_REF_SPEED = 20.0
-
-    for u in range(graph["n_nodes"]):
-        lat_u = float(lat_arr[u])
-        lon_u = float(lon_arr[u])
-        wx_lon_u = lon_u if lon_u >= 0.0 else lon_u + 360.0
-
-        lat_i = max(0, min(int((90.0 - lat_u) / 0.25), 720))
-        lon_i = int(wx_lon_u / 0.25) % 1440
-
-        sig_wh_val = sigwh[lat_i, lon_i]
-        sig_wh = 0.0 if np.isnan(sig_wh_val) else float(sig_wh_val)
-
-        was_val_raw = was[lat_i, lon_i]
-        was_val = 0.0 if np.isnan(was_val_raw) else float(was_val_raw)
-
-        wad_val_raw = wad[lat_i, lon_i]
-        wad_rad = 0.0 if np.isnan(wad_val_raw) else math.radians(float(wad_val_raw))
-
-        for e in range(row_ptr[u], row_ptr[u + 1]):
-            v = int(col_idx[e])
-            lat_v = float(lat_arr[v])
-            lon_v = float(lon_arr[v])
-
-            # Great-circle bearing from u to v (radians, clockwise from North)
-            dlon = math.radians(lon_v - lon_u)
-            rlat_u = math.radians(lat_u)
-            rlat_v = math.radians(lat_v)
-            hdg = math.atan2(
-                math.sin(dlon) * math.cos(rlat_v),
-                math.cos(rlat_u) * math.sin(rlat_v)
-                - math.sin(rlat_u) * math.cos(rlat_v) * math.cos(dlon),
-            )
-
-            # Headwind penalty: positive when vessel heads into the wind
-            headwind_f = max(0.0, -was_val * math.cos(hdg - wad_rad)) / WIND_REF_SPEED
-
-            proxy = float(base_dist_nm[e]) * (1.0 + sig_wh / 3.0 + headwind_f)
-            w = max(1, min(int(proxy * SCALE), MAX_W))
-            weights[e] = w
-
-    return weights
-
-
-def write_weights_bin(weights: np.ndarray, base_epoch: int, out_path: str):
-    """
-    Writes weights.bin matching WeightsHeader in weather_etl/src/weights_writer.hpp.
-    Header: magic(4) + version(4) + n_edges(4) + reserved(4) + base_epoch(8) = 24 bytes
-    """
-    with open(out_path, "wb") as f:
-        f.write(struct.pack("<IIIIq",
-                            WEIGHTS_MAGIC, WEIGHTS_VERSION,
-                            len(weights), 0, base_epoch))
-        f.write(weights.tobytes())
+def write_weights_bin(weights, base_epoch: int, out_path: str) -> None:
+    mwe.WeightsWriter.write(weights, base_epoch, out_path)
 
 
 def run(args):
@@ -172,38 +83,44 @@ def run(args):
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
-        # 1. Download .npy files
-        log.info("Fetching .npy files from s3://%s/%s", args.npy_bucket, args.npy_prefix)
-        fetch_npy_files(s3, args.npy_bucket, args.npy_prefix, tmp)
+        # 1. Download graph artifacts (graph.bin, flags.bin, snap_wave.bin, snap_wind.bin)
+        log.info("Fetching graph artifacts from s3://%s/%s", args.artifacts_bucket, args.artifacts_prefix)
+        artifact_paths = fetch_artifacts(s3, args.artifacts_bucket, args.artifacts_prefix, tmp)
+        graph = mwe.StaticGraph(
+            artifact_paths["graph.bin"], artifact_paths["flags.bin"],
+            artifact_paths["snap_wave.bin"], artifact_paths["snap_wind.bin"],
+        )
+        log.info("Graph: %d nodes, %d edges", graph.n_nodes, graph.n_edges)
 
-        # 2. Load weather variables needed for weight computation
-        for required in ("sigwh.npy", "was.npy", "wad.npy"):
-            if not (tmp / required).exists():
-                raise FileNotFoundError(f"{required} not found — required for weight computation")
-        sigwh = np.load(str(tmp / "sigwh.npy"))
-        was   = np.load(str(tmp / "was.npy"))
-        wad   = np.load(str(tmp / "wad.npy"))
-        log.info("sigwh shape: %s  dtype: %s", sigwh.shape, sigwh.dtype)
+        # 2. Download the target date's average-weather fields
+        weather_dir = tmp / "weather"
+        log.info("Fetching average weather for %s from s3://%s/%s",
+                  args.date.isoformat(), args.avg_weather_bucket, args.avg_weather_prefix)
+        fetch_avg_weather_day(
+            s3, args.avg_weather_bucket, args.avg_weather_prefix, weather_dir,
+            args.date.year, args.date.month, args.date.day)
 
-        # 3. Download graph.bin for CSR structure
-        graph_local = tmp / "graph.bin"
-        s3.download_file(args.graph_bucket, args.graph_key, str(graph_local))
-        graph = load_graph_csr(str(graph_local))
-        log.info("Graph: %d nodes, %d edges", graph["n_nodes"], graph["n_edges"])
+        # base_epoch identifies which date's weather this weights.bin was
+        # computed from — QueryServer derives the date to display from this
+        # field, so it must be the target date's midnight UTC, not "now".
+        base_epoch = int(datetime.datetime(
+            args.date.year, args.date.month, args.date.day,
+            tzinfo=datetime.timezone.utc).timestamp())
+        wx = mwe.load_avg_weather_buffer(
+            str(weather_dir), args.date.year, args.date.month, args.date.day, base_epoch)
 
-        # 4. Compute weights
+        # 3. Compute weights
         log.info("Computing edge weights...")
         t0 = time.perf_counter()
-        weights = compute_weights(graph, sigwh, was, wad)
+        weights = mwe.WeightsWriter.compute(graph, wx, args.step)
         log.info("Weights computed in %.1f s", time.perf_counter() - t0)
 
-        # 5. Write weights.bin
+        # 4. Write weights.bin
         weights_local = str(tmp / "weights.bin")
-        base_epoch = int(time.time())
         write_weights_bin(weights, base_epoch, weights_local)
         log.info("weights.bin written: %d edges, base_epoch=%d", len(weights), base_epoch)
 
-        # 6. Upload weights.bin to S3
+        # 5. Upload weights.bin to S3
         s3.upload_file(weights_local, args.out_bucket, args.out_key)
         log.info("Uploaded to s3://%s/%s", args.out_bucket, args.out_key)
 
@@ -211,33 +128,42 @@ def run(args):
 def _local_main(argv=None) -> int:
     """
     Local mode: delegates to the maritime-weights-writer C++ binary.
-    Faster than the Python compute path (avoids 18M Python iterations).
-    Use this for local development or when graph artifacts are on disk.
+    Use this for local development or when graph artifacts and the
+    average-weather dataset are already on disk (e.g. the mounted dataset
+    described in average_weather_description.md).
     """
     import subprocess
     parser = argparse.ArgumentParser(
         description="Maritime weather ETL — local mode (calls C++ binary)"
     )
-    parser.add_argument("--graph",  required=True)
-    parser.add_argument("--flags",  required=True)
-    parser.add_argument("--snap",   required=True)
-    parser.add_argument("--npy",    required=True, help="directory containing {var}.npy files")
-    parser.add_argument("--out",    required=True, help="output path for weights.bin")
+    parser.add_argument("--graph",            required=True)
+    parser.add_argument("--flags",             required=True)
+    parser.add_argument("--snap-wave",         required=True)
+    parser.add_argument("--snap-wind",         required=True)
+    parser.add_argument("--avg-weather-dir",   required=True,
+                         help="base directory containing <YYYY>/<MM>/<DD>/<field>.npy")
+    parser.add_argument("--date",              required=True, help="YYYY-MM-DD")
+    parser.add_argument("--out",               required=True, help="output path for weights.bin")
     parser.add_argument("--binary", default="maritime-weights-writer")
     parser.add_argument("--step",   default="0")
-    parser.add_argument("--epoch",  default=str(int(time.time())))
+    parser.add_argument("--epoch",  default=None,
+                         help="base_epoch override; default (recommended) lets the "
+                              "C++ binary derive it from --date (midnight UTC)")
     args = parser.parse_args(argv)
 
     cmd = [
         args.binary,
-        "--graph",  args.graph,
-        "--flags",  args.flags,
-        "--snap",   args.snap,
-        "--npy",    args.npy,
-        "--out",    args.out,
-        "--step",   args.step,
-        "--epoch",  args.epoch,
+        "--graph",           args.graph,
+        "--flags",           args.flags,
+        "--snap-wave",       args.snap_wave,
+        "--snap-wind",       args.snap_wind,
+        "--avg-weather-dir", args.avg_weather_dir,
+        "--date",            args.date,
+        "--out",             args.out,
+        "--step",            args.step,
     ]
+    if args.epoch is not None:
+        cmd += ["--epoch", args.epoch]
     return subprocess.run(cmd).returncode
 
 
@@ -249,10 +175,16 @@ if __name__ == "__main__":
         _sys.exit(_local_main())
     else:
         parser = argparse.ArgumentParser()
-        parser.add_argument("--npy-bucket",   required=True, help="S3 bucket containing .npy files")
-        parser.add_argument("--npy-prefix",   required=True, help="S3 prefix for .npy files (e.g. process/2026/06/09/18/)")
-        parser.add_argument("--graph-bucket", required=True, help="S3 bucket containing graph.bin")
-        parser.add_argument("--graph-key",    default="artifacts/graph.bin")
+        parser.add_argument("--avg-weather-bucket", required=True,
+                             help="S3 bucket containing the average-weather dataset")
+        parser.add_argument("--avg-weather-prefix", default="average-weather",
+                             help="S3 prefix above <YYYY>/<MM>/<DD>/<field>.npy")
+        parser.add_argument("--date", required=True, type=datetime.date.fromisoformat,
+                             help="voyage date, YYYY-MM-DD (mapped onto the 2024 dataset)")
+        parser.add_argument("--artifacts-bucket", required=True,
+                             help="S3 bucket containing graph.bin/flags.bin/snap_wave.bin/snap_wind.bin")
+        parser.add_argument("--artifacts-prefix", default="artifacts")
         parser.add_argument("--out-bucket",   required=True, help="S3 bucket for weights.bin output")
         parser.add_argument("--out-key",      default="weights/weights.bin")
+        parser.add_argument("--step", type=int, default=0, help="ref_time_step [0..23]")
         run(parser.parse_args())

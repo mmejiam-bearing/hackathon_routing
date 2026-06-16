@@ -125,6 +125,16 @@ struct CchRouteResult {
     float                 total_dist_nm = 0.f;
     float                 total_time_h  = 0.f;
     std::vector<uint8_t>  segment_flags;
+
+    // Weather sampled at each edge's "from" node and time step — one entry
+    // per edge (size == node_path.size() - 1). Empty when no WeatherBuffer
+    // has been loaded yet (status is still Ok; FOC/time/dist are also 0 in
+    // that case). Lets callers (e.g. the Python bindings) show what weather
+    // drove the route's cost, not just the resulting totals.
+    std::vector<float> sig_wh;     // significant wave height [m]
+    std::vector<float> wind_spd;   // wind speed [m/s]
+    std::vector<float> wind_dir;   // wind direction, going-to convention [deg]
+    std::vector<float> wave_dir;   // wave direction, going-to convention [deg]
 };
 
 // ---------------------------------------------------------------------------
@@ -148,9 +158,10 @@ public:
     explicit RoutingEngine(
         const std::string& graph_path,
         const std::string& flags_path,
-        const std::string& snap_path,
+        const std::string& snap_wave_path,
+        const std::string& snap_wind_path,
         const std::string& cch_topo_path)
-        : graph_   (graph_path, flags_path, snap_path)
+        : graph_   (graph_path, flags_path, snap_wave_path, snap_wind_path)
         , cch_     (cch_topo_path,
                     extract_tail(graph_),
                     std::vector<uint32_t>(
@@ -226,6 +237,12 @@ public:
         // If no WeatherBuffer has been loaded yet, foc and dist stay 0
         // (geometry is still returned — soft degradation, not an error).
         if (auto wx = weather_manager_.acquire()) {
+            const std::size_t n_edges = result.node_path.size() - 1;
+            result.sig_wh.reserve(n_edges);
+            result.wind_spd.reserve(n_edges);
+            result.wind_dir.reserve(n_edges);
+            result.wave_dir.reserve(n_edges);
+
             for (std::size_t i = 0; i + 1 < result.node_path.size(); ++i) {
                 const uint32_t from = result.node_path[i];
                 const uint32_t to   = result.node_path[i + 1];
@@ -239,6 +256,13 @@ public:
                 result.total_dist_nm +=
                     haversine_nm(graph_.lat()[from], graph_.lon()[from],
                                  graph_.lat()[to],   graph_.lon()[to]);
+
+                const std::size_t wave_idx = graph_.wave_weather_idx(from, ts);
+                const std::size_t wind_idx = graph_.wind_weather_idx(from, ts);
+                result.sig_wh.push_back(static_cast<float>(wx->sigwh[wave_idx]));
+                result.wind_spd.push_back(static_cast<float>(wx->was[wind_idx]));
+                result.wind_dir.push_back(static_cast<float>(wx->wad[wind_idx]));
+                result.wave_dir.push_back(static_cast<float>(wx->pwd[wave_idx]));
             }
         }
         return result;

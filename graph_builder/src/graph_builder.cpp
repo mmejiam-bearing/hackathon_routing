@@ -7,6 +7,7 @@
 #include "cch_preprocessor.hpp"
 #include "graph_serialiser.hpp"
 #include "maritime/edge_weight.hpp"
+#include "maritime/weather_manager.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -57,10 +58,11 @@ void run(const BuildConfig& cfg)
 
     fs::create_directories(cfg.output_dir);
 
-    const std::string graph_out = cfg.output_dir + "/graph.bin";
-    const std::string flags_out = cfg.output_dir + "/flags.bin";
-    const std::string snap_out  = cfg.output_dir + "/snap.bin";
-    const std::string cch_out   = cfg.output_dir + "/cch_topo.bin";
+    const std::string graph_out     = cfg.output_dir + "/graph.bin";
+    const std::string flags_out     = cfg.output_dir + "/flags.bin";
+    const std::string snap_wave_out = cfg.output_dir + "/snap_wave.bin";
+    const std::string snap_wind_out = cfg.output_dir + "/snap_wind.bin";
+    const std::string cch_out       = cfg.output_dir + "/cch_topo.bin";
 
     // ------------------------------------------------------------------
     // Step 1: Load GEBCO bathymetry and GSHHG land mask
@@ -206,13 +208,20 @@ void run(const BuildConfig& cfg)
     std::cout << "      done in " << sw.elapsed_s() << "s\n";
 
     // ------------------------------------------------------------------
-    // Step 4: Build snap table from sigwh.npy NaN mask
+    // Step 4: Build snap tables from sigwh.npy / was.npy NaN masks
     // ------------------------------------------------------------------
     sw = {};
-    std::cout << "[5/6] Building weather snap table from " << cfg.sigwh_npy_path << "...\n";
-    const SnapTable snap = build_snap_table(cfg.sigwh_npy_path);
-    serialise_snap_table(snap, snap_out);
-    std::cout << "      written: " << snap_out << "\n";
+    std::cout << "[5/6] Building wave snap table from " << cfg.sigwh_npy_path << "...\n";
+    const SnapTable snap_wave = build_snap_table(
+        cfg.sigwh_npy_path, maritime::WAVE_NJ, maritime::WX_NI);
+    serialise_snap_table(snap_wave, maritime::WAVE_NJ, maritime::WX_NI, snap_wave_out);
+    std::cout << "      written: " << snap_wave_out << "\n";
+
+    std::cout << "      Building wind snap table from " << cfg.was_npy_path << "...\n";
+    const SnapTable snap_wind = build_snap_table(
+        cfg.was_npy_path, maritime::WIND_NJ, maritime::WX_NI);
+    serialise_snap_table(snap_wind, maritime::WIND_NJ, maritime::WX_NI, snap_wind_out);
+    std::cout << "      written: " << snap_wind_out << "\n";
     std::cout << "      done in " << sw.elapsed_s() << "s\n";
 
     // ------------------------------------------------------------------

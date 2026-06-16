@@ -1,12 +1,10 @@
 #include "server.hpp"
 
-#include "npy_loader.hpp"
-#include "ocs_loader.hpp"
+#include "avg_weather_loader.hpp"
 
 #include "maritime/weather_manager.hpp"
 
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -17,51 +15,32 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Load all 14 weather variables from the given directory and return a fully
-// populated WeatherBuffer.  Only timestep 0 is filled (one .npy file = one
-// spatial frame).  Timesteps 1–23 are left zero (calm-water fallback for
-// longer routes in the POC).
+// Loads the average weather (see average_weather_description.md) for the
+// calendar date carried by weights.bin's base_epoch, mapped onto the 2024
+// dataset. Using base_epoch (already known at every call site) instead of a
+// separate "current date" config knob keeps the served weather always in
+// sync with whichever weights.bin is active — there is no way for them to
+// drift apart.
 std::shared_ptr<maritime::WeatherBuffer>
-load_weather_buffer(const std::string& npy_dir, int64_t base_epoch)
+load_weather_buffer(const std::string& avg_weather_dir, int64_t base_epoch)
 {
-    auto buf = maritime::WeatherBuffer::make_empty();
+    const auto day = std::chrono::floor<std::chrono::days>(
+        std::chrono::system_clock::from_time_t(static_cast<time_t>(base_epoch)));
+    const std::chrono::year_month_day ymd{day};
+
+    auto buf = maritime::weather_etl::AvgWeatherLoader::load(
+        avg_weather_dir,
+        static_cast<int>(ymd.year()),
+        static_cast<unsigned>(ymd.month()),
+        static_cast<unsigned>(ymd.day()));
     buf->base_epoch = base_epoch;
-
-    auto copy_npy = [&](std::vector<_Float16>& dst, const char* var) {
-        auto raw = maritime::weather_etl::NpyLoader::load(
-            npy_dir + "/" + var + ".npy");
-        std::memcpy(dst.data(), raw.data(),
-                    maritime::WX_N_POINTS * sizeof(uint16_t));
-    };
-
-    copy_npy(buf->sigwh, "sigwh");
-    copy_npy(buf->pwh,   "pwh");
-    copy_npy(buf->pwp,   "pwp");
-    copy_npy(buf->pwd,   "pwd");
-    copy_npy(buf->pswh,  "pswh");
-    copy_npy(buf->pswp,  "pswp");
-    copy_npy(buf->pswd,  "pswd");
-    copy_npy(buf->wsh,   "wsh");
-    copy_npy(buf->wsp,   "wsp");
-    copy_npy(buf->was,   "was");
-    copy_npy(buf->wad,   "wad");
-    copy_npy(buf->wsd,   "wsd");
-
-    auto uv = maritime::weather_etl::OcsLoader::load(
-        npy_dir + "/ocs.npy",
-        npy_dir + "/ocd.npy");
-    for (std::size_t k = 0; k < static_cast<std::size_t>(maritime::WX_N_POINTS); ++k) {
-        buf->ocs_u[k] = static_cast<_Float16>(uv.u[k]);
-        buf->ocs_v[k] = static_cast<_Float16>(uv.v[k]);
-    }
-
     return buf;
 }
 
 } // namespace
 
 QueryServer::QueryServer(const ServerConfig& cfg)
-    : engine_(cfg.graph_path, cfg.flags_path, cfg.snap_path, cfg.cch_topo_path)
+    : engine_(cfg.graph_path, cfg.flags_path, cfg.snap_wave_path, cfg.snap_wind_path, cfg.cch_topo_path)
     , cfg_(cfg)
 {
     // Load initial weights if already present
@@ -73,18 +52,22 @@ QueryServer::QueryServer(const ServerConfig& cfg)
         std::cout << "[router_server] Initial weights loaded from "
                   << weights_path << "\n";
 
-        if (!cfg_.npy_dir.empty()) {
-            engine_.update_weather(load_weather_buffer(cfg_.npy_dir, payload.base_epoch));
+        if (!cfg_.avg_weather_dir.empty()) {
+            engine_.update_weather(load_weather_buffer(cfg_.avg_weather_dir, payload.base_epoch));
             std::cout << "[router_server] Initial WeatherBuffer loaded from "
-                      << cfg_.npy_dir << "\n";
+                      << cfg_.avg_weather_dir << "\n";
         }
     } else {
         std::cout << "[router_server] No weights.bin found at startup — "
                      "waiting for ETL\n";
     }
 
-    // Start the background polling thread
-    poll_thread_ = std::thread(&QueryServer::poll_loop, this);
+    // poll_interval_s == 0 means one-shot: serve whatever was loaded above
+    // and never re-check weights.bin. Skipping the thread avoids a
+    // sleep_for(0s) busy-spin for callers that only need a single query
+    // (e.g. the Python bindings) and don't intend to call stop() promptly.
+    if (cfg_.poll_interval_s > 0)
+        poll_thread_ = std::thread(&QueryServer::poll_loop, this);
 }
 
 QueryServer::~QueryServer()
@@ -129,11 +112,11 @@ void QueryServer::poll_loop()
             std::cout << "[router_server] Weather weights updated from "
                       << weights_path << "\n";
 
-            if (!cfg_.npy_dir.empty()) {
+            if (!cfg_.avg_weather_dir.empty()) {
                 engine_.update_weather(
-                    load_weather_buffer(cfg_.npy_dir, payload.base_epoch));
+                    load_weather_buffer(cfg_.avg_weather_dir, payload.base_epoch));
                 std::cout << "[router_server] WeatherBuffer updated from "
-                          << cfg_.npy_dir << "\n";
+                          << cfg_.avg_weather_dir << "\n";
             }
         }
         catch (const std::exception& e) {

@@ -1,30 +1,36 @@
 //
 // maritime-weights-writer
 //
-// Weather ETL entry point.  Loads a set of .npy weather files and a
+// Weather ETL entry point. Loads one calendar day's average weather
+// (mapped onto the 2024 dataset — see average_weather_description.md) and a
 // pre-built graph, then writes weights.bin for the router_server to consume.
 //
 // Usage:
-//   maritime-weights-writer      \
-//     --graph  graph.bin         \
-//     --flags  flags.bin         \
-//     --snap   snap.bin          \
-//     --npy    /path/to/npy-dir  \
-//     --out    weights.bin       \
+//   maritime-weights-writer              \
+//     --graph           graph.bin        \
+//     --flags           flags.bin        \
+//     --snap-wave       snap_wave.bin    \
+//     --snap-wind       snap_wind.bin    \
+//     --avg-weather-dir /path/to/output  \
+//     --date            2026-06-08       \
+//     --out             weights.bin      \
 //     [--step  0]                (ref_time_step, default 0)
-//     [--epoch <unix-seconds>]   (base_epoch for WeightsHeader, default 0)
+//     [--epoch <unix-seconds>]   (base_epoch for WeightsHeader; default:
+//                                 midnight UTC of --date — QueryServer
+//                                 derives which date's weather to display
+//                                 from this field, so it must identify the
+//                                 same date --date selected, not "now")
 //
-#include "npy_loader.hpp"
-#include "ocs_loader.hpp"
+#include "avg_weather_loader.hpp"
 #include "weights_writer.hpp"
 
 #include "maritime/static_graph.hpp"
 #include "maritime/weather_manager.hpp"
 
+#include <chrono>
 #include <cstdlib>
-#include <cstring>
-#include <ctime>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -34,23 +40,41 @@ void print_usage(const char* argv0)
 {
     std::cerr
         << "Usage: " << argv0 << "\n"
-        << "  --graph  <path>   graph.bin\n"
-        << "  --flags  <path>   flags.bin\n"
-        << "  --snap   <path>   snap.bin\n"
-        << "  --npy    <dir>    directory containing {var}.npy files\n"
+        << "  --graph           <path>   graph.bin\n"
+        << "  --flags           <path>   flags.bin\n"
+        << "  --snap-wave       <path>   snap_wave.bin\n"
+        << "  --snap-wind       <path>   snap_wind.bin\n"
+        << "  --avg-weather-dir <dir>    contains <YYYY>/<MM>/<DD>/<field>.npy\n"
+        << "  --date            <YYYY-MM-DD>\n"
         << "  --out    <path>   output path for weights.bin\n"
         << "  --step   <int>    ref_time_step [0..23] (default 0)\n"
-        << "  --epoch  <int>    Unix epoch of forecast start (default: now)\n";
+        << "  --epoch  <int>    Unix epoch identifying the weather's date "
+           "(default: midnight UTC of --date)\n";
+}
+
+// Parses "YYYY-MM-DD" into (year, month, day). Throws on malformed input.
+void parse_iso_date(const std::string& s, int& year, int& month, int& day)
+{
+    int y, m, d;
+    char dash1, dash2;
+    std::istringstream iss(s);
+    iss >> y >> dash1 >> m >> dash2 >> d;
+    if (!iss || dash1 != '-' || dash2 != '-')
+        throw std::invalid_argument("--date must be YYYY-MM-DD, got: " + s);
+    year = y; month = m; day = d;
 }
 
 struct Args {
     std::string graph_path;
     std::string flags_path;
-    std::string snap_path;
-    std::string npy_dir;
+    std::string snap_wave_path;
+    std::string snap_wind_path;
+    std::string avg_weather_dir;
+    std::string date_str;
     std::string out_path;
-    int         ref_step  = 0;
-    int64_t     epoch     = static_cast<int64_t>(std::time(nullptr));
+    int         ref_step    = 0;
+    int64_t     epoch       = 0;
+    bool        epoch_given = false;
 };
 
 [[nodiscard]] Args parse_args(int argc, char** argv)
@@ -65,13 +89,18 @@ struct Args {
         std::string key{argv[i]};
         std::string val{argv[i + 1]};
 
-        if      (key == "--graph")  args.graph_path = val;
-        else if (key == "--flags")  args.flags_path = val;
-        else if (key == "--snap")   args.snap_path  = val;
-        else if (key == "--npy")    args.npy_dir    = val;
-        else if (key == "--out")    args.out_path   = val;
-        else if (key == "--step")   args.ref_step   = std::stoi(val);
-        else if (key == "--epoch")  args.epoch      = static_cast<int64_t>(std::stoll(val));
+        if      (key == "--graph")           args.graph_path      = val;
+        else if (key == "--flags")           args.flags_path      = val;
+        else if (key == "--snap-wave")       args.snap_wave_path  = val;
+        else if (key == "--snap-wind")       args.snap_wind_path  = val;
+        else if (key == "--avg-weather-dir") args.avg_weather_dir = val;
+        else if (key == "--date")            args.date_str        = val;
+        else if (key == "--out")             args.out_path        = val;
+        else if (key == "--step")            args.ref_step        = std::stoi(val);
+        else if (key == "--epoch") {
+            args.epoch       = static_cast<int64_t>(std::stoll(val));
+            args.epoch_given = true;
+        }
         else {
             std::cerr << "Unknown argument: " << key << "\n";
             print_usage(argv[0]);
@@ -79,8 +108,9 @@ struct Args {
         }
     }
 
-    if (args.graph_path.empty() || args.flags_path.empty() ||
-        args.snap_path.empty()  || args.npy_dir.empty()    ||
+    if (args.graph_path.empty()      || args.flags_path.empty() ||
+        args.snap_wave_path.empty()  || args.snap_wind_path.empty() ||
+        args.avg_weather_dir.empty() || args.date_str.empty() ||
         args.out_path.empty()) {
         std::cerr << "Missing required arguments.\n";
         print_usage(argv[0]);
@@ -97,44 +127,30 @@ int main(int argc, char** argv)
     try {
         const auto args = parse_args(argc, argv);
 
+        int year = 0, month = 0, day = 0;
+        parse_iso_date(args.date_str, year, month, day);
+
+        int64_t epoch = args.epoch;
+        if (!args.epoch_given) {
+            const std::chrono::sys_days midnight_utc{
+                std::chrono::year{year} /
+                std::chrono::month{static_cast<unsigned>(month)} /
+                std::chrono::day{static_cast<unsigned>(day)}};
+            epoch = std::chrono::duration_cast<std::chrono::seconds>(
+                midnight_utc.time_since_epoch()).count();
+        }
+
         std::cout << "[weights-writer] Loading graph from "
                   << args.graph_path << " ...\n";
         maritime::StaticGraph graph(
-            args.graph_path, args.flags_path, args.snap_path);
+            args.graph_path, args.flags_path,
+            args.snap_wave_path, args.snap_wind_path);
 
-        std::cout << "[weights-writer] Loading weather from "
-                  << args.npy_dir << " ...\n";
-
-        auto buf = maritime::WeatherBuffer::make_empty();
-        buf->base_epoch = args.epoch;
-
-        auto copy_npy = [&](std::vector<_Float16>& dst, const char* var) {
-            auto raw = maritime::weather_etl::NpyLoader::load(
-                args.npy_dir + "/" + var + ".npy");
-            std::memcpy(dst.data(), raw.data(),
-                        maritime::WX_N_POINTS * sizeof(uint16_t));
-        };
-
-        copy_npy(buf->sigwh, "sigwh");
-        copy_npy(buf->pwh,   "pwh");
-        copy_npy(buf->pwp,   "pwp");
-        copy_npy(buf->pwd,   "pwd");
-        copy_npy(buf->pswh,  "pswh");
-        copy_npy(buf->pswp,  "pswp");
-        copy_npy(buf->pswd,  "pswd");
-        copy_npy(buf->wsh,   "wsh");
-        copy_npy(buf->wsp,   "wsp");
-        copy_npy(buf->was,   "was");
-        copy_npy(buf->wad,   "wad");
-        copy_npy(buf->wsd,   "wsd");
-
-        auto uv = maritime::weather_etl::OcsLoader::load(
-            args.npy_dir + "/ocs.npy",
-            args.npy_dir + "/ocd.npy");
-        for (std::size_t k = 0; k < static_cast<std::size_t>(maritime::WX_N_POINTS); ++k) {
-            buf->ocs_u[k] = static_cast<_Float16>(uv.u[k]);
-            buf->ocs_v[k] = static_cast<_Float16>(uv.v[k]);
-        }
+        std::cout << "[weights-writer] Loading average weather for "
+                  << args.date_str << " from " << args.avg_weather_dir << " ...\n";
+        auto buf = maritime::weather_etl::AvgWeatherLoader::load(
+            args.avg_weather_dir, year, month, day);
+        buf->base_epoch = epoch;
 
         std::cout << "[weights-writer] Computing edge weights "
                      "(ref_time_step=" << args.ref_step << ") ...\n";
@@ -143,7 +159,7 @@ int main(int argc, char** argv)
 
         std::cout << "[weights-writer] Writing " << args.out_path << " ...\n";
         maritime::weather_etl::WeightsWriter::write(
-            weights, args.epoch, args.out_path);
+            weights, epoch, args.out_path);
 
         std::cout << "[weights-writer] Done. " << weights.size()
                   << " edge weights written.\n";

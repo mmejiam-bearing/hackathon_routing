@@ -23,8 +23,12 @@ try:
     import matplotlib.cm as cm
     import matplotlib.patheffects as pe
     import numpy as np
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
 except ImportError:
-    sys.exit("pip install matplotlib numpy")
+    sys.exit("pip install matplotlib numpy cartopy")
+
+GEO = ccrs.PlateCarree()
 
 
 # ---------------------------------------------------------------------------
@@ -73,12 +77,15 @@ ROUTE_STYLES = [
     # calm
     dict(cmap="winter",  lw=2.4, ls="-",   marker="o", ms=5,   label_dy=+0.9,
          name="Calm"),
-    # fading storm
+    # fading/rising storm
     dict(cmap="YlOrBr",  lw=2.2, ls="--",  marker="s", ms=4.5, label_dy=-1.6,
-         name="Fading storm"),
+         name="Rising storm"),
     # sustained storm
     dict(cmap="RdPu",    lw=2.0, ls=":",   marker="D", ms=4.0, label_dy=+2.2,
          name="Sustained storm"),
+    # moving Gaussian storm
+    dict(cmap="Greens",  lw=2.2, ls="-.",  marker="^", ms=4.5, label_dy=-3.2,
+         name="Moving storm"),
 ]
 
 
@@ -98,6 +105,7 @@ def main() -> None:
     parser.add_argument("--calm",   default="/tmp/rolling_calm.geojson")
     parser.add_argument("--fading", default=None)
     parser.add_argument("--storm",  default=None)
+    parser.add_argument("--moving", default=None)
     parser.add_argument("--out",    default="rolling_comparison.png")
     parser.add_argument("--storm-lat-min", type=float, default=30.0)
     parser.add_argument("--storm-lat-max", type=float, default=65.0)
@@ -108,7 +116,7 @@ def main() -> None:
     # Build list of (days, style) pairs for whichever files were supplied
     routes: list[tuple[list[dict], dict]] = []
     for path, style in zip(
-        [args.calm, args.fading, args.storm],
+        [args.calm, args.fading, args.storm, args.moving],
         ROUTE_STYLES,
     ):
         if path:
@@ -118,22 +126,25 @@ def main() -> None:
         sys.exit("No GeoJSON files supplied.")
 
     # ---- figure ---------------------------------------------------------------
-    fig, axes = plt.subplots(
-        1, 2,
-        figsize=(22, 11),
-        gridspec_kw={"width_ratios": [3, 1]},
-    )
-    ax_map, ax_bar = axes
+    fig = plt.figure(figsize=(22, 11))
+    gs  = fig.add_gridspec(1, 2, width_ratios=[3, 1])
+    ax_map = fig.add_subplot(gs[0, 0], projection=GEO)
+    ax_bar = fig.add_subplot(gs[0, 1])
 
     fig.patch.set_facecolor("#111827")
-    ax_map.set_facecolor("#b8d8e8")
     ax_bar.set_facecolor("#1f2937")
+
+    ax_map.set_extent([-95, 20, 5, 78], crs=GEO)
+    ax_map.add_feature(cfeature.OCEAN.with_scale("50m"), facecolor="#b8d8e8", zorder=0)
+    ax_map.add_feature(cfeature.LAND.with_scale("50m"), facecolor="#3a3a3a", zorder=1)
+    ax_map.add_feature(cfeature.COASTLINE.with_scale("50m"), edgecolor="#888888",
+                        linewidth=0.6, zorder=1)
+    gl = ax_map.gridlines(draw_labels=True, color="#444444", alpha=0.4, linestyle=":")
+    gl.top_labels = gl.right_labels = False
+    gl.xlabel_style = gl.ylabel_style = {"color": "#aaaaaa", "fontsize": 9}
 
     for sp in ax_map.spines.values():
         sp.set_edgecolor("#444444")
-    ax_map.tick_params(colors="white", labelsize=9)
-    ax_map.set_xlabel("Longitude", color="#aaaaaa", fontsize=10)
-    ax_map.set_ylabel("Latitude",  color="#aaaaaa", fontsize=10)
 
     # ---- storm box ------------------------------------------------------------
     bw = args.storm_lon_max - args.storm_lon_min
@@ -142,13 +153,14 @@ def main() -> None:
         (args.storm_lon_min, args.storm_lat_min), bw, bh,
         boxstyle="square,pad=0",
         linewidth=1.8, edgecolor="#ff5555", facecolor="#ff000020", zorder=2,
+        transform=GEO,
     ))
     ax_map.text(
         (args.storm_lon_min + args.storm_lon_max) / 2,
         args.storm_lat_max - 2.5,
         "STORM REGION  ·  sigwh 15 m  ·  wind 45 m/s",
         ha="center", va="top", fontsize=8, color="#ffaaaa",
-        fontweight="bold", zorder=3,
+        fontweight="bold", zorder=3, transform=GEO,
     )
 
     # ---- draw routes ----------------------------------------------------------
@@ -164,14 +176,15 @@ def main() -> None:
             c = color_fn(i)
             ax_map.plot(day["lons"], day["lats"],
                         color=c, lw=style["lw"], ls=style["ls"],
-                        solid_capstyle="round", zorder=4)
+                        solid_capstyle="round", zorder=4, transform=GEO)
             ex, ey = day_end(day)
             ax_map.plot(ex, ey, style["marker"], color=c,
-                        ms=style["ms"], zorder=5)
+                        ms=style["ms"], zorder=5, transform=GEO)
             ax_map.text(
                 ex + 0.4, ey + style["label_dy"], str(day["day"]),
                 color=c, fontsize=7.5, fontweight="bold", zorder=6,
                 path_effects=[pe.withStroke(linewidth=1.8, foreground="black")],
+                transform=GEO,
             )
 
         dist, foc, time = totals(days)
@@ -190,10 +203,10 @@ def main() -> None:
         (ox, oy, "New York", -1.8),
         (dx, dy, "London",   +1.4),
     ]:
-        ax_map.plot(px, py, "w*", ms=13, zorder=7)
+        ax_map.plot(px, py, "w*", ms=13, zorder=7, transform=GEO)
         ax_map.text(px, py + dy_off, lbl,
                     ha="center", color="white", fontsize=9, fontweight="bold",
-                    zorder=8,
+                    zorder=8, transform=GEO,
                     path_effects=[pe.withStroke(linewidth=2, foreground="black")])
 
     # ---- storm-box legend entry -----------------------------------------------
@@ -209,8 +222,6 @@ def main() -> None:
         fontsize=8, framealpha=0.92,
     )
 
-    ax_map.set_xlim(-95, 20)
-    ax_map.set_ylim(5, 78)
     ax_map.set_title(
         "Rolling-horizon re-routing: New York → London\n"
         "Each day replans from current position using that day's forecast",
@@ -276,9 +287,11 @@ def main() -> None:
     )
 
     # ---- save -----------------------------------------------------------------
-    plt.tight_layout()
-    plt.savefig(args.out, dpi=160, facecolor=fig.get_facecolor(),
-                bbox_inches="tight")
+    # NB: no plt.tight_layout() and no bbox_inches="tight" — both mishandle
+    # this GeoAxes (the former crashes via a cartopy/shapely gridliner bug,
+    # GEOSException: non-closed LinearRing; the latter silently miscomputes
+    # the tight bbox and crops the map panel out of the saved image).
+    plt.savefig(args.out, dpi=160, facecolor=fig.get_facecolor())
     print(f"Saved: {args.out}")
 
 

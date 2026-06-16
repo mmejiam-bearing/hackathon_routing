@@ -14,22 +14,17 @@ TEST(WeatherBuffer, MakeEmptyAllocatesCorrectSize)
     auto buf = WeatherBuffer::make_empty();
     ASSERT_NE(buf, nullptr);
 
-    const std::size_t expected = static_cast<std::size_t>(WX_N_TOTAL);
+    const std::size_t expected_wave = static_cast<std::size_t>(WAVE_N_TOTAL);
+    const std::size_t expected_wind = static_cast<std::size_t>(WIND_N_TOTAL);
 
-    EXPECT_EQ(buf->sigwh.size(), expected);
-    EXPECT_EQ(buf->pwh.size(),   expected);
-    EXPECT_EQ(buf->pwp.size(),   expected);
-    EXPECT_EQ(buf->pwd.size(),   expected);
-    EXPECT_EQ(buf->pswh.size(),  expected);
-    EXPECT_EQ(buf->pswp.size(),  expected);
-    EXPECT_EQ(buf->pswd.size(),  expected);
-    EXPECT_EQ(buf->wsh.size(),   expected);
-    EXPECT_EQ(buf->wsp.size(),   expected);
-    EXPECT_EQ(buf->was.size(),   expected);
-    EXPECT_EQ(buf->wad.size(),   expected);
-    EXPECT_EQ(buf->wsd.size(),   expected);
-    EXPECT_EQ(buf->ocs_u.size(), expected);
-    EXPECT_EQ(buf->ocs_v.size(), expected);
+    EXPECT_EQ(buf->sigwh.size(),          expected_wave);
+    EXPECT_EQ(buf->wsh.size(),            expected_wave);
+    EXPECT_EQ(buf->wsp.size(),            expected_wave);
+    EXPECT_EQ(buf->wsd.size(),            expected_wave);
+    EXPECT_EQ(buf->pwd.size(),            expected_wave);
+    EXPECT_EQ(buf->swell_residual.size(), expected_wave);
+    EXPECT_EQ(buf->was.size(),            expected_wind);
+    EXPECT_EQ(buf->wad.size(),            expected_wind);
 }
 
 TEST(WeatherBuffer, MakeEmptyZeroInitialised)
@@ -47,7 +42,7 @@ TEST(WeatherBuffer, ViewReturnsCorrectSpan)
     buf->sigwh[1] = _Float16{2.5f};
 
     auto span = buf->view(buf->sigwh);
-    EXPECT_EQ(span.size(), static_cast<std::size_t>(WX_N_TOTAL));
+    EXPECT_EQ(span.size(), static_cast<std::size_t>(WAVE_N_TOTAL));
     EXPECT_NEAR(static_cast<float>(span[0]), 1.5f, 0.01f);
     EXPECT_NEAR(static_cast<float>(span[1]), 2.5f, 0.01f);
 }
@@ -177,10 +172,13 @@ TEST(WeatherManager, ConcurrentUpdateAndAcquire)
 
 TEST(WeatherBuffer, GridConstantsAreConsistent)
 {
-    EXPECT_EQ(WX_NJ, 721);
+    EXPECT_EQ(WAVE_NJ, 621);
+    EXPECT_EQ(WIND_NJ, 721);
     EXPECT_EQ(WX_NI, 1440);
-    EXPECT_EQ(WX_N_POINTS, WX_NJ * WX_NI);
-    EXPECT_EQ(WX_N_TOTAL, WX_N_TIMESTEPS * WX_N_POINTS);
+    EXPECT_EQ(WAVE_N_POINTS, WAVE_NJ * WX_NI);
+    EXPECT_EQ(WIND_N_POINTS, WIND_NJ * WX_NI);
+    EXPECT_EQ(WAVE_N_TOTAL, WX_N_TIMESTEPS * WAVE_N_POINTS);
+    EXPECT_EQ(WIND_N_TOTAL, WX_N_TIMESTEPS * WIND_N_POINTS);
     EXPECT_EQ(WX_N_TIMESTEPS, 24);
 }
 

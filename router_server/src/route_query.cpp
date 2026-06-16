@@ -2,8 +2,9 @@
 // runs a route query, and prints the result.
 //
 // Usage:
-//   maritime-route-query --graph <path> --flags <path> --snap <path>
-//                        --cch <path> --weights <dir> [--npy <dir>]
+//   maritime-route-query --graph <path> --flags <path>
+//                        --snap-wave <path> --snap-wind <path>
+//                        --cch <path> --weights <dir> [--avg-weather-dir <dir>]
 //                        --from-lat <f> --from-lon <f>
 //                        --to-lat <f>   --to-lon <f>
 
@@ -44,12 +45,13 @@ int main(int argc, char** argv)
 
     for (int i = 1; i < argc - 1; i += 2) {
         std::string k{argv[i]}, v{argv[i+1]};
-        if      (k == "--graph")    cfg.graph_path    = v;
-        else if (k == "--flags")    cfg.flags_path    = v;
-        else if (k == "--snap")     cfg.snap_path     = v;
-        else if (k == "--cch")      cfg.cch_topo_path = v;
-        else if (k == "--weights")  cfg.weights_dir   = v;
-        else if (k == "--npy")      cfg.npy_dir       = v;
+        if      (k == "--graph")     cfg.graph_path     = v;
+        else if (k == "--flags")     cfg.flags_path     = v;
+        else if (k == "--snap-wave") cfg.snap_wave_path = v;
+        else if (k == "--snap-wind") cfg.snap_wind_path = v;
+        else if (k == "--cch")       cfg.cch_topo_path  = v;
+        else if (k == "--weights")          cfg.weights_dir     = v;
+        else if (k == "--avg-weather-dir")  cfg.avg_weather_dir = v;
         else if (k == "--from-lat") from_lat = std::stof(v);
         else if (k == "--from-lon") from_lon = std::stof(v);
         else if (k == "--to-lat")   to_lat   = std::stof(v);
@@ -69,7 +71,8 @@ int main(int argc, char** argv)
         maritime::router_server::QueryServer server(cfg);
 
         // Find nodes nearest to requested ports
-        maritime::StaticGraph g(cfg.graph_path, cfg.flags_path, cfg.snap_path);
+        maritime::StaticGraph g(cfg.graph_path, cfg.flags_path,
+                                 cfg.snap_wave_path, cfg.snap_wind_path);
         const uint32_t src = nearest_node(g, from_lat, from_lon);
         const uint32_t dst = nearest_node(g, to_lat,   to_lon);
 

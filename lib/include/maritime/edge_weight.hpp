@@ -344,14 +344,13 @@ struct EdgeCost {
     // ------------------------------------------------------------------
     // Weather lookup
     // ------------------------------------------------------------------
-    const std::size_t wx_idx = graph.weather_idx(from, time_step);
+    const std::size_t wave_idx = graph.wave_weather_idx(from, time_step);
+    const std::size_t wind_idx = graph.wind_weather_idx(from, time_step);
 
-    const float sig_wh   = static_cast<float>(wx.sigwh[wx_idx]);
-    const float wind_spd = static_cast<float>(wx.was  [wx_idx]);
-    const float cur_u    = static_cast<float>(wx.ocs_u[wx_idx]);
-    const float cur_v    = static_cast<float>(wx.ocs_v[wx_idx]);
-    const float wad_deg  = static_cast<float>(wx.wad  [wx_idx]);  // wind going-to [°]
-    const float pwd_deg  = static_cast<float>(wx.pwd  [wx_idx]);  // wave going-to [°]
+    const float sig_wh   = static_cast<float>(wx.sigwh[wave_idx]);
+    const float wind_spd = static_cast<float>(wx.was  [wind_idx]);
+    const float wad_deg  = static_cast<float>(wx.wad  [wind_idx]);  // wind going-to [°]
+    const float pwd_deg  = static_cast<float>(wx.pwd  [wave_idx]);  // wave going-to [°]
 
     // ------------------------------------------------------------------
     // Vessel heading
@@ -359,9 +358,6 @@ struct EdgeCost {
     const float hdg = bearing_rad(
         graph.lat()[from], graph.lon()[from],
         graph.lat()[to],   graph.lon()[to]);
-
-    // Current component projected onto vessel heading (for FOC model)
-    const float current_comp = cur_u * std::sin(hdg) + cur_v * std::cos(hdg);
 
     // ------------------------------------------------------------------
     // Weather-relative angles
@@ -406,8 +402,6 @@ struct EdgeCost {
         1.f + 0.15f * static_cast<float>((from_flags & FLAG_ECA) != 0);
     const float tss_penalty =
         static_cast<float>((from_flags & FLAG_TSS) != 0) * 50.f;
-
-    (void)current_comp;  // available for future current-resistance extension
 
     return EdgeCost{
         foc_per_nm * dist_nm * eca_factor + tss_penalty,

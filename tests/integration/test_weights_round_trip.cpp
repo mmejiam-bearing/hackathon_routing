@@ -143,23 +143,29 @@ static maritime::graph_builder::GraphData make_two_node_graph()
     return g;
 }
 
-static void write_identity_snap(const std::string& path)
+static void write_identity_snap(const std::string& path, int nj, int ni)
 {
     maritime::SnapHeader hdr{};
     hdr.magic   = 0x5041'4E53u;
     hdr.version = 1;
-    hdr.n_lat   = 721;
-    hdr.n_lon   = 1440;
-    constexpr std::size_t N = 721u * 1440u;
-    std::vector<uint16_t> snap_lat(N), snap_lon(N);
-    for (std::size_t i = 0; i < N; ++i) {
-        snap_lat[i] = static_cast<uint16_t>(i / 1440);
-        snap_lon[i] = static_cast<uint16_t>(i % 1440);
+    hdr.n_lat   = static_cast<uint32_t>(nj);
+    hdr.n_lon   = static_cast<uint32_t>(ni);
+    const std::size_t n = static_cast<std::size_t>(nj) * static_cast<std::size_t>(ni);
+    std::vector<uint16_t> snap_lat(n), snap_lon(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        snap_lat[i] = static_cast<uint16_t>(i / static_cast<std::size_t>(ni));
+        snap_lon[i] = static_cast<uint16_t>(i % static_cast<std::size_t>(ni));
     }
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
-    f.write(reinterpret_cast<const char*>(snap_lat.data()), N * 2);
-    f.write(reinterpret_cast<const char*>(snap_lon.data()), N * 2);
+    f.write(reinterpret_cast<const char*>(snap_lat.data()), n * 2);
+    f.write(reinterpret_cast<const char*>(snap_lon.data()), n * 2);
+}
+
+static void write_identity_snaps(const std::string& wave_path, const std::string& wind_path)
+{
+    write_identity_snap(wave_path, maritime::WAVE_NJ, maritime::WX_NI);
+    write_identity_snap(wind_path, maritime::WIND_NJ, maritime::WX_NI);
 }
 
 class WeightsComputeTest : public ::testing::Test {
@@ -168,13 +174,14 @@ protected:
     {
         tmp_  = fs::temp_directory_path() / "maritime_weights_compute_test";
         fs::create_directories(tmp_);
-        graph_path_ = (tmp_ / "graph.bin").string();
-        flags_path_ = (tmp_ / "flags.bin").string();
-        snap_path_  = (tmp_ / "snap.bin").string();
+        graph_path_     = (tmp_ / "graph.bin").string();
+        flags_path_     = (tmp_ / "flags.bin").string();
+        snap_wave_path_ = (tmp_ / "snap_wave.bin").string();
+        snap_wind_path_ = (tmp_ / "snap_wind.bin").string();
 
         auto data = make_two_node_graph();
         maritime::graph_builder::serialise_graph(data, graph_path_, flags_path_);
-        write_identity_snap(snap_path_);
+        write_identity_snaps(snap_wave_path_, snap_wind_path_);
     }
     void TearDown() override { fs::remove_all(tmp_); }
 
@@ -183,11 +190,13 @@ protected:
         float sig_wh, float was, float wad_deg, float pwd_deg)
     {
         auto buf = maritime::WeatherBuffer::make_empty();
-        for (std::size_t k = 0; k < static_cast<std::size_t>(maritime::WX_N_POINTS); ++k) {
+        for (std::size_t k = 0; k < static_cast<std::size_t>(maritime::WAVE_N_POINTS); ++k) {
             buf->sigwh[k] = static_cast<_Float16>(sig_wh);
-            buf->was  [k] = static_cast<_Float16>(was);
-            buf->wad  [k] = static_cast<_Float16>(wad_deg);
             buf->pwd  [k] = static_cast<_Float16>(pwd_deg);
+        }
+        for (std::size_t k = 0; k < static_cast<std::size_t>(maritime::WIND_N_POINTS); ++k) {
+            buf->was[k] = static_cast<_Float16>(was);
+            buf->wad[k] = static_cast<_Float16>(wad_deg);
         }
         return buf;
     }
@@ -210,12 +219,12 @@ protected:
     }
 
     fs::path    tmp_;
-    std::string graph_path_, flags_path_, snap_path_;
+    std::string graph_path_, flags_path_, snap_wave_path_, snap_wind_path_;
 };
 
 TEST_F(WeightsComputeTest, PhysicsBranchNonZero)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto wx     = make_wx(0.f, 0.f, 0.f, 0.f);
     auto vessel = make_vessel();
 
@@ -230,7 +239,7 @@ TEST_F(WeightsComputeTest, StormHeadOnHigherThanCalm)
 {
     // Vessel heading south (≈180°). Head-on storm: waves/wind coming from south
     // → going-to direction = north = 0°.
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
 
     auto wx_calm  = make_wx(0.f,  0.f,   0.f, 0.f);
     auto wx_storm = make_wx(6.f, 20.f,   0.f, 0.f);   // head-on storm
@@ -251,7 +260,7 @@ TEST_F(WeightsComputeTest, PhysicsDiffersFromProxy)
 {
     // With non-trivial weather the physics branch and the legacy proxy should
     // produce different integer weights.
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto wx     = make_wx(4.f, 15.f, 0.f, 0.f);
     auto vessel = make_vessel();
 
@@ -268,7 +277,7 @@ TEST_F(WeightsComputeTest, PhysicsDiffersFromProxy)
 TEST_F(WeightsComputeTest, ProxyBranchUnchanged)
 {
     // nullptr vessel must still produce the same weight as before (no regression).
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto wx = make_wx(3.f, 10.f, 90.f, 90.f);   // beam wind
 
     auto w1 = maritime::weather_etl::WeightsWriter::compute(graph, *wx, 0, nullptr);
@@ -287,35 +296,42 @@ TEST_F(WeightsComputeTest, ProxyBranchUnchanged)
 // with calm, letting each test isolate one aspect of the Gaussian weighting.
 // ---------------------------------------------------------------------------
 
-// Fill all WX_N_TOTAL elements uniformly (all timesteps × all grid points).
+// Fill all wave/wind-grid elements uniformly (all timesteps × all grid points).
 static std::shared_ptr<maritime::WeatherBuffer> make_wx_uniform(
     float sig_wh, float was, float wad_deg, float pwd_deg)
 {
     auto buf = maritime::WeatherBuffer::make_empty();
-    const std::size_t total = static_cast<std::size_t>(maritime::WX_N_TOTAL);
-    for (std::size_t k = 0; k < total; ++k) {
+    const std::size_t wave_total = static_cast<std::size_t>(maritime::WAVE_N_TOTAL);
+    const std::size_t wind_total = static_cast<std::size_t>(maritime::WIND_N_TOTAL);
+    for (std::size_t k = 0; k < wave_total; ++k) {
         buf->sigwh[k] = static_cast<_Float16>(sig_wh);
-        buf->was  [k] = static_cast<_Float16>(was);
-        buf->wad  [k] = static_cast<_Float16>(wad_deg);
         buf->pwd  [k] = static_cast<_Float16>(pwd_deg);
+    }
+    for (std::size_t k = 0; k < wind_total; ++k) {
+        buf->was[k] = static_cast<_Float16>(was);
+        buf->wad[k] = static_cast<_Float16>(wad_deg);
     }
     return buf;
 }
 
 // Fill with calm everywhere, then set one timestep's entire spatial grid to
-// storm conditions. Layout: [ts * WX_N_POINTS + spatial_idx].
+// storm conditions. Layout: [ts * <grid>_N_POINTS + spatial_idx].
 static std::shared_ptr<maritime::WeatherBuffer> make_wx_timestep_storm(
     float storm_sig_wh, float storm_was, float storm_wad, float storm_pwd,
     int storm_ts)
 {
     auto buf = maritime::WeatherBuffer::make_empty();  // all zeros (calm)
-    const std::size_t n_pts = static_cast<std::size_t>(maritime::WX_N_POINTS);
-    for (std::size_t s = 0; s < n_pts; ++s) {
-        const std::size_t idx = static_cast<std::size_t>(storm_ts) * n_pts + s;
+    const std::size_t wave_n = static_cast<std::size_t>(maritime::WAVE_N_POINTS);
+    const std::size_t wind_n = static_cast<std::size_t>(maritime::WIND_N_POINTS);
+    for (std::size_t s = 0; s < wave_n; ++s) {
+        const std::size_t idx = static_cast<std::size_t>(storm_ts) * wave_n + s;
         buf->sigwh[idx] = static_cast<_Float16>(storm_sig_wh);
-        buf->was  [idx] = static_cast<_Float16>(storm_was);
-        buf->wad  [idx] = static_cast<_Float16>(storm_wad);
         buf->pwd  [idx] = static_cast<_Float16>(storm_pwd);
+    }
+    for (std::size_t s = 0; s < wind_n; ++s) {
+        const std::size_t idx = static_cast<std::size_t>(storm_ts) * wind_n + s;
+        buf->was[idx] = static_cast<_Float16>(storm_was);
+        buf->wad[idx] = static_cast<_Float16>(storm_wad);
     }
     return buf;
 }
@@ -325,12 +341,12 @@ static std::shared_ptr<maritime::WeatherBuffer> make_wx_timestep_storm(
 // that must hold before any per-timestep variation is meaningful.
 TEST_F(WeightsComputeTest, UniformWeatherMatchesSingleSnapshot)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto vessel = make_vessel();
 
     // Moderate storm, same in all timesteps.
     auto wx_ts  = make_wx_uniform(3.f, 10.f, 0.f, 0.f);
-    // Legacy make_wx fills only ts=0 spatial slice (WX_N_POINTS elements).
+    // Legacy make_wx fills only ts=0 spatial slice (per-grid N_POINTS elements).
     auto wx_ts0 = make_wx(3.f, 10.f, 0.f, 0.f);
 
     const float origin_lat = graph.lat()[0], origin_lon = graph.lon()[0];
@@ -361,7 +377,7 @@ TEST_F(WeightsComputeTest, UniformWeatherMatchesSingleSnapshot)
 // ts=0 and the Gaussian weight is negligible there.
 TEST_F(WeightsComputeTest, EarlyNodeWeightsEarlyTimesteps)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto vessel = make_vessel();
 
     // Storm only at ts=0; all other timesteps calm.
@@ -390,7 +406,7 @@ TEST_F(WeightsComputeTest, EarlyNodeWeightsEarlyTimesteps)
 // (t_mean≈0h, d_along≈168nm at ts=12 → heavily attenuated).
 TEST_F(WeightsComputeTest, StormAtMidpointAffectsMidpointNode)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto vessel = make_vessel();
 
     // Storm only at ts=12.
@@ -420,7 +436,7 @@ TEST_F(WeightsComputeTest, StormAtMidpointAffectsMidpointNode)
 // that fires when all 24 Gaussian values are below the 1e-6 threshold.
 TEST_F(WeightsComputeTest, ComputeBlendedNonZero)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto vessel = make_vessel();
     auto wx     = make_wx_uniform(0.f, 0.f, 0.f, 0.f);
 
@@ -439,7 +455,7 @@ TEST_F(WeightsComputeTest, ComputeBlendedNonZero)
 // should make w(12m) > 4× w(6m) (a linear model would give exactly 2×).
 TEST_F(WeightsComputeTest, ExponentialPenaltySuperlinear)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto vessel = make_vessel();
 
     const float origin_lat = graph.lat()[0], origin_lon = graph.lon()[0];
@@ -517,13 +533,14 @@ protected:
     {
         tmp_  = fs::temp_directory_path() / "maritime_routing_pref_test";
         fs::create_directories(tmp_);
-        graph_path_ = (tmp_ / "graph.bin").string();
-        flags_path_ = (tmp_ / "flags.bin").string();
-        snap_path_  = (tmp_ / "snap.bin").string();
+        graph_path_     = (tmp_ / "graph.bin").string();
+        flags_path_     = (tmp_ / "flags.bin").string();
+        snap_wave_path_ = (tmp_ / "snap_wave.bin").string();
+        snap_wind_path_ = (tmp_ / "snap_wind.bin").string();
 
         auto data = make_four_node_graph();
         maritime::graph_builder::serialise_graph(data, graph_path_, flags_path_);
-        write_identity_snap(snap_path_);
+        write_identity_snaps(snap_wave_path_, snap_wind_path_);
     }
     void TearDown() override { fs::remove_all(tmp_); }
 
@@ -544,7 +561,7 @@ protected:
     }
 
     fs::path    tmp_;
-    std::string graph_path_, flags_path_, snap_path_;
+    std::string graph_path_, flags_path_, snap_wave_path_, snap_wind_path_;
 };
 
 // Both paths O→M_near→D and O→M_far→D have equal total distance (480nm) in calm.
@@ -557,7 +574,7 @@ protected:
 // so route inversion here comes purely from along-track distance discrimination.
 TEST_F(RoutingPreferenceTest, StormAtMidpointInvertsRoutePreference)
 {
-    maritime::StaticGraph graph(graph_path_, flags_path_, snap_path_);
+    maritime::StaticGraph graph(graph_path_, flags_path_, snap_wave_path_, snap_wind_path_);
     auto vessel = make_vessel();
 
     // Origin=O(0), destination=D(2)

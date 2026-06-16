@@ -36,8 +36,9 @@ struct BuildConfig {
     std::string gebco_path;       // GEBCO 2023 NetCDF (.nc)
     std::string gshhg_path;       // GSHHG directory containing .shp files
     std::string enc_path;         // NOAA ENC directory containing .000 files
-    std::string sigwh_npy_path;   // sigwh.npy — land/ocean mask source
-    std::string output_dir;       // destination for graph.bin, flags.bin, snap.bin
+    std::string sigwh_npy_path;   // sigwh.npy — wave-grid land/ocean mask source
+    std::string was_npy_path;     // was.npy — wind-grid land/ocean mask source
+    std::string output_dir;       // destination for graph.bin, flags.bin, snap_*.bin
 
     float resolution_deg = 0.25f; // graph node spacing in degrees
     float min_draft_m    = 3.0f;  // shallowest vessel draft to support
@@ -52,9 +53,9 @@ struct BuildConfig {
 //   1. Load GSHHG land polygons + GEBCO bathymetry
 //   2. Build global grid, prune land and shallow nodes
 //   3. Apply geographic passage restrictions (FLAG_RESTRICTED)
-//   4. Build snap table from sigwh.npy NaN mask
+//   4. Build snap tables from sigwh.npy / was.npy NaN masks
 //   5. Run CCH topology preprocessing via RoutingKit
-//   6. Serialise graph.bin, flags.bin, snap.bin to output_dir
+//   6. Serialise graph.bin, flags.bin, snap_wave.bin, snap_wind.bin to output_dir
 //
 // Throws std::runtime_error on any failure.
 // Idempotent: re-running overwrites previous output.

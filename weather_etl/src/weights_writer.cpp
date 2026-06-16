@@ -55,18 +55,19 @@ std::vector<uint32_t> WeightsWriter::compute(
                 continue;
             }
 
-            const std::size_t wx_idx = graph.weather_idx(u, ref_time_step);
+            const std::size_t wave_idx = graph.wave_weather_idx(u, ref_time_step);
+            const std::size_t wind_idx = graph.wind_weather_idx(u, ref_time_step);
 
             const float base_nm = graph.base_dist()[e];
-            const float sig_wh  = static_cast<float>(wx.sigwh[wx_idx]);
+            const float sig_wh  = static_cast<float>(wx.sigwh[wave_idx]);
 
             constexpr float WIND_REF_SPEED = 20.f;   // normalise to gale-force (m/s)
             const uint32_t  v        = graph.col_idx()[e];
             const float     hdg      = bearing_rad(
                 graph.lat()[u], graph.lon()[u],
                 graph.lat()[v], graph.lon()[v]);
-            const float wad_deg  = static_cast<float>(wx.wad[wx_idx]);
-            const float was_val  = static_cast<float>(wx.was[wx_idx]);
+            const float wad_deg  = static_cast<float>(wx.wad[wind_idx]);
+            const float was_val  = static_cast<float>(wx.was[wind_idx]);
 
             constexpr uint32_t MAX_W = RoutingKit::inf_weight - 1u;
 
@@ -79,7 +80,7 @@ std::vector<uint32_t> WeightsWriter::compute(
                 constexpr float DEG2R = std::numbers::pi_v<float> / 180.f;
                 constexpr float R2DEG = 180.f / std::numbers::pi_v<float>;
 
-                const float pwd_deg      = static_cast<float>(wx.pwd[wx_idx]);
+                const float pwd_deg      = static_cast<float>(wx.pwd[wave_idx]);
                 const float wind_from    = (wad_deg + 180.f) * DEG2R;
                 const float wave_from    = (pwd_deg + 180.f) * DEG2R;
                 const float wind_rel_deg = std::acos(std::cos(hdg - wind_from)) * R2DEG;
@@ -187,11 +188,12 @@ std::vector<uint32_t> WeightsWriter::compute_blended(
                     -0.5f * (d_along * d_along * sa2_inv + d_perp_term));
                 if (g < 1e-6f) continue;
 
-                const std::size_t wx_idx = graph.weather_idx(u, ts);
-                const float sig_wh  = static_cast<float>(wx.sigwh[wx_idx]);
-                const float was_val = static_cast<float>(wx.was  [wx_idx]);
-                const float wad_deg = static_cast<float>(wx.wad  [wx_idx]);
-                const float pwd_deg = static_cast<float>(wx.pwd  [wx_idx]);
+                const std::size_t wave_idx = graph.wave_weather_idx(u, ts);
+                const std::size_t wind_idx = graph.wind_weather_idx(u, ts);
+                const float sig_wh  = static_cast<float>(wx.sigwh[wave_idx]);
+                const float was_val = static_cast<float>(wx.was  [wind_idx]);
+                const float wad_deg = static_cast<float>(wx.wad  [wind_idx]);
+                const float pwd_deg = static_cast<float>(wx.pwd  [wave_idx]);
 
                 const float spd     = actual_speed_kts(sig_wh, was_val, wad_deg, pwd_deg,
                                                        hdg, vessel);
