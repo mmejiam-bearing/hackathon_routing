@@ -384,6 +384,301 @@ visualise the daily segments and corridor shifts.
 
 ---
 
+## Temporal weight blending
+
+### The single-timestep limitation
+
+The CCH customization step bakes one `uint32_t` weight into each edge. The rolling-horizon router calls `WeightsWriter::compute()` with `ref_time_step = 0` — the *current* forecast snapshot. The CCH therefore treats today's weather as permanent for the entire voyage. When a storm fades on day 2, the optimizer re-discovers a shorter route, but the vessel has already committed to the storm-avoidance corridor. The only correction available is a physically implausible U-turn.
+
+### Mathematical derivation
+
+Let `ρ(lat, lon, t)` be the probability density of the vessel's position at time `t`. It evolves under the advection-diffusion PDE:
+
+```
+∂ρ/∂t = D ∇²ρ − v · ∇ρ
+```
+
+where `v` is drift toward the destination and `D` is path diffusion (uncertainty in which corridor the optimizer selects). The correct edge weight is the *expected* traversal cost integrated over all plausible transit times:
+
+```
+w(u, v) = ∫₀ᵀ ρ(lat_u, lon_u, t) × cost(u, v, t) dt
+```
+
+**Anisotropic Gaussian approximation.** Rather than solving the PDE, approximate `ρ` as a Gaussian with two principal axes aligned to the route:
+
+```
+ρ(u, t) ≈ exp(-½ [(d_along(u,t)/σ_along)² + (d_perp(u)/σ_perp)²])
+```
+
+where:
+
+| Symbol | Meaning | Default |
+|---|---|---|
+| `d_along(u,t)` | `haversine(origin, u) − t × service_speed_kts` [nm] | — |
+| `d_perp(u)` | `\|cross_track_dist(origin→dest great circle, u)\|` [nm] | — |
+| `σ_along` | Timing spread — vessel is on schedule to within ±σ_along/speed hours | 100 nm |
+| `σ_perp` | Path-choice spread — optimizer may select any corridor within ±σ_perp | 300 nm |
+
+The anisotropy (`σ_perp >> σ_along`) reflects reality: the vessel arrives roughly on schedule, but may take any of many parallel corridors.
+
+**Discrete integral over 24 forecast timesteps:**
+
+```
+w(u,v) = Σ_{ts=0}^{23}  g(u,ts) × cost(u,v,ts)
+         ─────────────────────────────────────────
+                  Σ_{ts=0}^{23} g(u,ts)
+
+g(u,ts) = exp(-½ [(d_along(u,ts)/σ_along)² + (d_perp(u)/σ_perp)²])
+```
+
+Note: `d_perp` is constant across timesteps for a given node, so it factors out of the ratio and cancels. Route preference inversion is driven by *along-track* position, not lateral offset.
+
+When all 24 Gaussian values fall below `1e-6` (node is far outside the expected voyage window), the weight falls back to calm-water transit time.
+
+### Implementation
+
+`WeightsWriter::compute_blended()` in [weather_etl/src/weights_writer.cpp](weather_etl/src/weights_writer.cpp) implements the formula above. `voyage_router.cpp` calls it on every forecast reload, passing the current vessel position as origin and the fixed destination. As the vessel advances each day, the Gaussian naturally shifts forward — early-route nodes become irrelevant and late-route nodes gain weight.
+
+### Computational cost
+
+O(n_edges × 24) per planning horizon. For a 700 K-node graph (~4 M edges) and a 24-timestep forecast, this is ~100 M floating-point operations per day. On a modern CPU this takes about 2–5 seconds — well within the once-per-day budget of the rolling-horizon router.
+
+---
+
+## Advection-diffusion model: full derivation
+
+This section derives the temporal blending formula from first principles, for readers familiar with PDEs, stochastic processes, and numerical linear algebra. Readers who only need the implementation can skip to [Temporal weight blending](#temporal-weight-blending).
+
+### 1. Why a scalar edge weight is insufficient
+
+The CCH customization step requires one `uint32_t` weight per directed edge. It is baked into the acceleration structure at forecast-reload time and used unchanged for every route query until the next reload. The fundamental question is:
+
+> Which value of `cost(u, v, t)` — over which time `t` — should define `w(u, v)`?
+
+Choosing `t = 0` (the current forecast snapshot) treats today's sea state as permanent for the entire voyage. For a node 2,000 nm ahead of the vessel, `t = 0` weather is the weather at departure, not at the time the vessel will actually traverse that edge (~6 days from now at 14 kts). This systematic mispricing causes the optimizer to commit to corridors that become sub-optimal as the forecast evolves, and produces U-turns when the CCH is re-customized under a new snapshot.
+
+The correct weight is the **expected** traversal cost under the probability distribution of vessel position over time:
+
+```
+w(u, v) = E_ρ[cost(u, v, T(u))] = ∫₀^∞ ρ(xᵤ, t) × cost(u, v, t) dt
+```
+
+where `ρ(x, t)` is the probability density of the vessel's position at time `t`, and `T(u)` is the (random) time of first passage through node `u`. Everything that follows is a tractable approximation to this integral.
+
+---
+
+### 2. The forward Kolmogorov (Fokker-Planck) equation
+
+Let the vessel's position on the ocean surface evolve as an Itô diffusion on ℝ²:
+
+```
+dXₜ = v(Xₜ, t) dt + √(2D) dWₜ
+```
+
+where `v(x, t)` is the deterministic drift field (the planned route direction at service speed), `D` is the diffusion coefficient (path uncertainty arising from corridor choice), and `Wₜ` is standard 2D Brownian motion. The law `ρ(x, t)` of this SDE satisfies the **forward Kolmogorov equation** (Fokker-Planck):
+
+```
+∂ρ/∂t = −∇·(v ρ) + D ∇²ρ
+```
+
+For a drift aligned purely along the great circle — `v = v₀ ê_ξ` where `ξ` is the along-track coordinate and `v₀` is the service speed — and with spatially constant `D`:
+
+```
+∂ρ/∂t = D ∇²ρ − v₀ ∂ρ/∂ξ
+```
+
+This is the standard linear advection-diffusion PDE. The advective term `−v₀ ∂ρ/∂ξ` translates the density rightward at speed `v₀`; the diffusive term `D ∇²ρ` spreads it isotropically. The density `ρ` is the probability of finding the vessel at position `x` at time `t`.
+
+---
+
+### 3. Exact solution and its intractability
+
+**On ℝ¹ with constant coefficients**, the fundamental solution (Green's function) of the 1D advection-diffusion equation with initial condition `ρ(x, 0) = δ(x − x₀)` is:
+
+```
+G(x, t; x₀) = 1/√(4πDt) × exp(−(x − x₀ − v₀t)² / (4Dt))
+```
+
+This is a Gaussian that advects at velocity `v₀` and diffuses with variance `σ²(t) = 2Dt`. The along-track mean is `μ(t) = x₀ + v₀t`, exactly linear in `t`.
+
+**On the ocean routing graph**, exact computation is intractable for three reasons:
+
+1. **Irregular domain with variable coefficients**: The ocean surface is a subset of S² with complex irregular boundaries (coastlines). The diffusion coefficient `D` and the drift `v` are spatially variable and time-dependent (following-sea adds effective drift; head-sea reduces it). The eigenfunctions of the Laplace-Beltrami operator on this domain have no closed form, so spectral methods are ruled out.
+
+2. **Non-autonomous system**: Weather changes the drift field `v(x, t)` over time. The PDE is non-autonomous, so the fundamental solution `G(x, t; x₀, s)` depends on both `t` and `s` separately (not just `t − s`). The solution must be integrated forward numerically.
+
+3. **Dimensionality**: On the ~700K-node graph, the spatial discretization requires tracking a 700K-dimensional density vector. A single forward Euler step costs O(n_edges) ≈ O(4M) operations; a full 240-step integration (10 days at 1-hour resolution) costs O(1B) — and must be repeated for every forecast reload, for every edge query. The resulting computation is several orders of magnitude too slow.
+
+---
+
+### 4. Graph-Laplacian state-space form
+
+The spatial discretization of the advection-diffusion PDE on the routing graph yields a linear autonomous ODE system. Let `ρ ∈ ℝⁿ` be the vector of probability mass at each node. The discrete system is:
+
+```
+dρ/dt = (D L − V) ρ
+```
+
+where:
+
+| Symbol | Definition | Size |
+|---|---|---|
+| `L` | Normalized graph Laplacian: `L = Dₑ − A`, where `Dₑ` is the diagonal weighted-degree matrix and `A` is the adjacency matrix | n × n, sparse |
+| `V` | Diagonal advection operator: `Vᵢᵢ = v₀ · hᵢ⁻¹`, where `hᵢ` is the local grid spacing at node `i` | n × n, diagonal |
+| `D` | Scalar diffusion coefficient | scalar |
+
+The formal solution with initial condition `ρ(0) = eₛ` (unit mass at the source node) is:
+
+```
+ρ(t) = exp((DL − V)t) · eₛ
+```
+
+This is the **matrix exponential** of `(DL − V)`. Since `L` is symmetric positive semi-definite (for an undirected graph) and `V` is a positive diagonal perturbation, the operator `(DL − V)` is stable (all eigenvalues have non-positive real part), ensuring the density remains normalizable.
+
+**Why we do not use this directly**: Computing `exp(Mt)` for an `n × n` matrix `M` via Krylov subspace methods (Arnoldi/Lanczos) requires O(n × k) operations per matrix-vector product and k Krylov steps for accuracy. For `n = 700K` with `k ≈ 50` Krylov vectors and T = 240 timesteps, this costs approximately:
+
+```
+240 × 50 × 4M × (float ops per multiply-add) ≈ 48B operations per forecast reload
+```
+
+This exceeds the available compute budget by roughly 3 orders of magnitude. Furthermore, the operator `(DL − V)` changes on every forecast reload (because the edge weights in `L` depend on weather), making cached decompositions invalid.
+
+---
+
+### 5. Anisotropic Gaussian approximation
+
+Rather than solving the full PDE, we approximate `ρ` as an **anisotropic Gaussian** in a route-aligned coordinate frame. This approximation is exact on ℝ¹ with constant coefficients (§3) and degrades gracefully on the curved, irregular ocean domain.
+
+**Route-aligned frame**: Define two orthogonal axes at each point along the great circle O→D:
+- `ξ`: along-track coordinate — signed distance along the great circle from O [nm]
+- `η`: cross-track coordinate — perpendicular distance from the great circle [nm]
+
+In this frame, the approximate density at time `t` (= `ts × Δt`, discrete timestep) is:
+
+```
+ρ(ξ, η, ts) ∝ exp(−½ [(ξ − ts × v₀)² / σ_along² + η² / σ_perp²])
+```
+
+The along-track mean `μ(ts) = ts × v₀` advances linearly — consistent with the exact Green's function. The standard deviations `σ_along` and `σ_perp` are **time-independent**, which is a simplification (in the exact solution `σ_along(t) = √(2Dt)` grows with `t`). Using fixed `σ` replaces the time-growing variance with a *worst-case* spread over the relevant portion of the voyage horizon.
+
+**Physical interpretation of the anisotropy** (`σ_perp >> σ_along`):
+- `σ_along` controls **timing uncertainty**: the vessel is on schedule to within ±σ_along/v₀ hours. At `σ_along = 200 nm` and 14 kts, this is ±14 hours — a realistic scheduling spread over multi-day voyages.
+- `σ_perp` controls **path-choice uncertainty**: the CCH may select any of many parallel corridors spanning ±σ_perp cross-track. At `σ_perp = 400 nm`, this spans ±6.7° latitude at 50°N, covering the full corridor width of the North Atlantic.
+
+The diffusion process in the cross-track direction is much weaker than the advection in the along-track direction: `D_perp ≪ v₀ × σ_along`. This justifies treating the cross-track spread as approximately constant, governed by optimizer diversity rather than physical diffusion.
+
+**Evaluation at graph nodes**: For node `u = (lat_u, lon_u)` at forecast timestep `ts`:
+
+```
+g(u, ts) = exp(−½ [(d_along(u, ts) / σ_along)² + (d_perp(u) / σ_perp)²])
+
+d_along(u, ts) = haversine(O, u) − ts × v₀        [nm]
+d_perp(u)      = |cross_track_nm(O→D great circle, u)|   [nm, constant in ts]
+```
+
+The function `d_along(u, ts) = 0` when `ts = haversine(O, u) / v₀`, i.e., when the vessel's expected position coincides with node `u`. This is the Gaussian's peak timestep for node `u`.
+
+---
+
+### 6. Discrete integral and the blended weight formula
+
+Substituting the Gaussian approximation into the expected-cost integral and discretizing over `T = 24` forecast timesteps (one per hour of the NOAA GFS cycle):
+
+```
+w(u, v) = Σ_{ts=0}^{T-1} g(u, ts) × cost(u, v, ts)
+           ──────────────────────────────────────────
+                    Σ_{ts=0}^{T-1} g(u, ts)
+```
+
+This is the **Gaussian-weighted time average** of the traversal cost. Timesteps where node `u` falls near the vessel's expected position receive high weight; timesteps where node `u` is far from the expected position are down-weighted exponentially.
+
+The per-timestep traversal cost is:
+
+```
+cost(u, v, ts) = (base_nm / actual_speed(wx[u,ts], hdg, vessel)) × P(sig_wh[u,ts])
+```
+
+where `actual_speed` computes the Hollenbach/Kreitner/Kwon physics-based speed (see §8 below) and `P(sig_wh)` is the exponential penalty multiplier (see §7 below).
+
+**Truncation**: Gaussian values below `1e-6` are skipped. At `σ_along = 200 nm` and `v₀ = 14 kts`, the Gaussian for node `u` is non-negligible (> 1e-6) for timesteps `ts ∈ [t_mean − 5σ_along/v₀, t_mean + 5σ_along/v₀]`, where `t_mean = haversine(O, u) / v₀`. At `σ_along = 200 nm`, this window is ±71 hours ≈ ±3 days. Since the forecast is only 24 timesteps, the effective window is always contained within the forecast horizon for nodes within 3 days of travel from the origin.
+
+**Fallback**: If all 24 Gaussian weights are below `1e-6` (node `u` is far outside the expected voyage window — either ahead of the destination or far behind the origin), the blended weight falls back to calm-water transit time `base_nm / v₀`. This ensures well-defined weights for all graph nodes regardless of voyage geometry.
+
+---
+
+### 7. Algebraic cancellation of σ_perp
+
+The cross-track term `d_perp(u)² / σ_perp²` is **constant across all timesteps** for a fixed node `u`. Factor it from the summation:
+
+```
+w(u,v) = [C × Σ_ts exp(−½ d_along²/σ_along²) × cost_ts]
+          ────────────────────────────────────────────────
+          [C × Σ_ts exp(−½ d_along²/σ_along²)           ]
+
+where C = exp(−½ d_perp²/σ_perp²)
+```
+
+`C` cancels from numerator and denominator. The blended weight `w(u, v)` is **independent of σ_perp**.
+
+**Consequence for route design**: Two paths P₁ and P₂ that differ only in cross-track offset (one goes 200 nm north of the great circle, the other 200 nm south) have identical Gaussian weight profiles across all timesteps — because their `d_along` sequences are identical. The temporal blending assigns them equal cost, regardless of `σ_perp`. Route preference inversion between P₁ and P₂ can only arise if they differ in **along-track distance from the origin**, i.e., if they arrive at their respective "branch points" at different times, exposing them to different dominant timesteps and thus different weather conditions.
+
+This is the correct physical result: the optimizer should distinguish routes by their temporal exposure to weather events, not by their lateral offset within a calm corridor.
+
+---
+
+### 8. Speed-loss physics and the exponential penalty
+
+**Speed-loss model** (`actual_speed_kts()` in `weights_writer.cpp`):
+
+The vessel's speed through water is reduced by wave-induced added resistance via the **Kwon formula** (equal-power assumption):
+
+```
+ΔR = R_wave(sig_wh, θ_wave_rel) + R_wind(was, θ_wind_rel)
+speed_loss% = 100 × (√(1 + ΔR/R_cw) − 1)
+actual_speed = max(v_min, v₀ × (1 − speed_loss%/100))
+```
+
+where `R_cw` is calm-water resistance (Hollenbach formula), `R_wave` is wave resistance (Kreitner formula, 8-segment angular table), `R_wind` is aerodynamic resistance (Fujiwara formula), and `v_min = 1 kt` is a safety floor.
+
+At `sig_wh = 15 m` with head seas, `ΔR/R_cw ≈ 36`, giving `speed_loss% ≈ 100%` and `actual_speed = 1 kt`. The edge cost is therefore 14× above calm water — significant, but still finite and passable.
+
+**Exponential penalty** (`weather_penalty_multiplier()` in `edge_weight.hpp`):
+
+```
+P(sig_wh) = exp(κ × max(0, sig_wh − θ))     κ = 0.6 neper/m,  θ = 4 m
+```
+
+This is a **log-domain barrier** in the optimal control sense. In interior-point methods, a log-barrier `−δ × log(c − x)` prevents a trajectory from reaching the constraint boundary `x = c`. Here, the constraint is "the vessel cannot make progress in sig_wh ≥ 15 m hurricane conditions." The exponential barrier grows without bound as `sig_wh → ∞`, making conditions above the threshold progressively more costly while remaining finite (the optimizer can still route through moderate weather if no bypass exists).
+
+The combined effect:
+
+| sig_wh | Speed loss | Penalty P | Net cost multiplier vs calm |
+|---|---|---|---|
+| 0 m   | 0%   | 1×    | 1×      |
+| 4 m   | ~15% | 1×    | ~1.2×   |
+| 8 m   | ~50% | ~11×  | ~22×    |
+| 12 m  | ~85% | ~121× | ~807×   |
+| 15 m  | 100% | ~735× | ~10290× |
+
+At 12 m sig_wh, any detour shorter than ~807× the storm path distance is preferred. For a 500 nm storm stretch, any bypass adding less than ~400,000 nm is cheaper — effectively forcing avoidance. At 15 m, the edge weight is clamped to `MAX_W = RoutingKit::inf_weight − 1`, making the edge near-impassable.
+
+---
+
+### 9. Implementation summary
+
+| Component | Location | Role |
+|---|---|---|
+| `compute_blended()` | `weather_etl/src/weights_writer.cpp` | Main blending loop: computes `g(u,ts)`, accumulates weighted cost |
+| `actual_speed_kts()` | `weather_etl/src/weights_writer.cpp` | Speed-loss physics (Hollenbach + Kreitner + Kwon) |
+| `weather_penalty_multiplier()` | `lib/include/maritime/edge_weight.hpp` | Exponential barrier term |
+| `cross_track_nm()` | `lib/include/maritime/edge_weight.hpp` | Computes `d_perp(u)` via spherical trigonometry |
+| `along_track_nm()` | `lib/include/maritime/edge_weight.hpp` | Computes along-track projection (used in tests) |
+| `voyage_router.cpp` | `router_server/src/voyage_router.cpp` | Calls `compute_blended()` daily with updated origin |
+
+The origin passed to `compute_blended()` updates each day as the vessel advances along the route. This shifts the Gaussian forward — nodes already traversed become negligible, nodes approaching become dominant — without requiring any explicit state machine.
+
+---
+
 ## Weather in edge cost calculations
 
 Weather influences routing at **two separate points** in the pipeline with different roles and different files. It is important to understand both, because changing one without the other produces inconsistent results.
